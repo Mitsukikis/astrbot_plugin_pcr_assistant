@@ -1,0 +1,21 @@
+services:
+  pcr-real-api:
+    image: ghcr.io/cc004/autopcr:latest
+    container_name: pcr-real-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18081:18081"
+    volumes:
+      - autopcr_autopcr_cache:/app/cache
+      - autopcr_autopcr_log:/app/log
+      - autopcr_autopcr_result:/app/result
+      - ./pcr_real_api.py:/app/pcr_real_api.py:ro
+    command: ["python3", "/app/pcr_real_api.py", "--host", "0.0.0.0", "--port", "18081"]
+
+volumes:
+  autopcr_autopcr_cache:
+    external: true
+  autopcr_autopcr_log:
+    external: true
+  autopcr_autopcr_result:
+    external: true

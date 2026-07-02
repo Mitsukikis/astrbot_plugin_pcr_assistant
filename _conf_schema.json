@@ -1,0 +1,52 @@
+{
+  "autopcr_base_url": {
+    "description": "AutoPCR 本机地址。插件会用它生成清日常链接，通常填 http://127.0.0.1:18080/daily。",
+    "type": "string",
+    "default": "http://127.0.0.1:18080/daily"
+  },
+  "autopcr_public_url": {
+    "description": "AutoPCR 公网登录地址。请改成你自己的域名或服务器地址，例如 http://你的IP:18080/daily/login。",
+    "type": "string",
+    "default": "http://你的服务器IP:18080/daily/login"
+  },
+  "pcr_real_api_url": {
+    "description": "PCR 真实数据接口地址。建议只监听 127.0.0.1，不要暴露到公网。",
+    "type": "string",
+    "default": "http://127.0.0.1:18081"
+  },
+  "pcrdfans_api_key": {
+    "description": "pcrdfans Bot API Key，用于“怎么拆/竞技场作业”真实查询；需要在 pcrdfans.com/bot 申请后填写。",
+    "type": "string",
+    "default": ""
+  },
+  "pcrdfans_search_url": {
+    "description": "pcrdfans 作业搜索接口地址，通常保持默认。",
+    "type": "string",
+    "default": "https://api.pcrdfans.com/x/v1/search"
+  },
+  "real_api_user": {
+    "description": "默认 AutoPCR 查询用户 QQ（兼容旧数据用）。新部署一般留空，插件会按发送者 QQ 传入。",
+    "type": "string",
+    "default": ""
+  },
+  "monitor_interval_seconds": {
+    "description": "竞技场/会战后台轮询间隔（秒）。过低可能更容易顶号，建议 60 秒起。",
+    "type": "string",
+    "default": "60"
+  },
+  "admin_qq": {
+    "description": "主人 QQ 号。只识别真实 QQ 号，不识别群昵称/群名片。",
+    "type": "string",
+    "default": ""
+  },
+  "admin_qqs": {
+    "description": "管理员 QQ 列表，可用逗号、空格、分号或换行分隔；只识别纯数字 QQ 号。",
+    "type": "string",
+    "default": ""
+  },
+  "blocked_qqs": {
+    "description": "黑名单 QQ 列表；这里的 QQ 会被 PCR 功能拦截，优先级高于管理员列表。",
+    "type": "string",
+    "default": ""
+  }
+}
