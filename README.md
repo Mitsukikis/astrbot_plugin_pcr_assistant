@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="releases/astrbot_plugin_pcr_assistant-v0.1.0.zip">下载 v0.1.0 ZIP</a>
+  <a href="https://github.com/Mitsukikis/astrbot_plugin_pcr_assistant/releases/download/v0.1.0/astrbot_plugin_pcr_assistant-v0.1.0.zip">下载 v0.1.0 ZIP</a>
   ·
   <a href="#快速开始">快速开始</a>
   ·
