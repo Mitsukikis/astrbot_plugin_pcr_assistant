@@ -616,3 +616,14 @@ def test_new_nicknames_do_not_bypass_private_qq_allowlist(plugin, plugin_module,
     request.message_str = '怎么拆春剑黄骑AMS蚊子布丁'
     assert collect(plugin.plain_text_dispatch, request) == []
     plugin.arena_web.query.assert_not_awaited()
+
+
+@pytest.mark.parametrize('group', [GROUP, None])
+def test_wiki_aliases_query_same_real_ids_in_private_and_group(plugin, plugin_module, tmp_path, group):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    request.message_obj.group_id = group
+    request.unified_msg_origin = SESSION if group else f'qq:FriendMessage:{OWNER}'
+    request.message_str = '怎么拆elsAMS蚊子小虎水m'
+    replies = collect(plugin.plain_text_dispatch, request)
+    assert plugin.arena_web.query.await_args.args[0] == [1290,1230,1186,1005,1270]
+    assert any(isinstance(reply,str) and '厄里斯' in reply for reply in replies)

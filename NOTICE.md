@@ -17,6 +17,9 @@
 - KokkoroBot: <https://github.com/zzbslayer/KokkoroBot>
   - 本项目参考了 PCR QQ 机器人生态里的竞技场作业查询体验。
   - 角色别名/阵容解析相关数据和思路参考 KokkoroBot，KokkoroBot 使用 GPL-3.0 授权。
+- 公主连结 BWIKI 及页面贡献者：<https://wiki.biligame.com/pcr/角色图鉴>、<https://wiki.biligame.com/pcr/角色别称>
+  - 2026-10-21 核对角色 ID、名称和短别称的事实对应关系；别称表注明来自花舞攻略组。
+  - `pcr_wiki_aliases.json` 仅记录经校验的名称对应关系，不打包网站正文、别称解释、攻略或角色图片；不代表获得站方背书或 API 授权。
 - redive.estertion.win: <https://redive.estertion.win/>
   - 图片阵容识别会在运行时下载角色头像作为本地缓存。
 - 花舞公开文档: <https://docs.hwmoe.com/zh/cygames/pcr/auto_report_knife>

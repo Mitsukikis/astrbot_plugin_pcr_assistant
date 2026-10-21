@@ -133,7 +133,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.2.4"
+PLUGIN_VERSION = "0.2.5"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
