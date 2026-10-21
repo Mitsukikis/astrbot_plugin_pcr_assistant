@@ -44,6 +44,11 @@
     "type": "string",
     "default": ""
   },
+  "allowed_qqs": {
+    "description": "额外授权 QQ 列表：留空仅主人可用；需要分享时手动填写 QQ，用逗号、空格或换行分隔。授权用户仅可在已启用群使用 PCR；私聊可绑定自己的账号。管理员身份不会自动授予使用权限。未授权 QQ 静默忽略。",
+    "type": "string",
+    "default": ""
+  },
   "blocked_qqs": {
     "description": "黑名单 QQ 列表；这里的 QQ 会被 PCR 功能拦截，优先级高于管理员列表。",
     "type": "string",

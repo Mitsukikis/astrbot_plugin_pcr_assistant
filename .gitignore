@@ -11,6 +11,15 @@ data/
 *.secrets.json
 state.json
 state.secrets.json
+.env
+.env.*
+!.env.example
+*_config.json
+*.bak*
+backups/
+cache/
+log/
+result/
 
 # Local release output
 dist/

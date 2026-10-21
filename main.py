@@ -28,7 +28,13 @@ from .arena_state import (
     set_arena_push_target,
 )
 from .autopcr_client import AutoPCRClient
-from .auth import is_admin_qq, numeric_sender_id_from_event, parse_qq_list
+from .auth import (
+    is_admin_qq,
+    is_allowed_qq,
+    numeric_sender_id_from_event,
+    parse_qq_list,
+    require_pcr_access,
+)
 from .clan_access import (
     clan_command_account_qq,
     clan_command_needs_account,
@@ -113,7 +119,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
@@ -415,8 +421,48 @@ class PCRAssistantPlugin(Star):
             "monitor_interval_seconds",
             DEFAULT_MONITOR_INTERVAL_SECONDS,
         )
-        context.register_task(self._monitor_loop(), "PCR real arena/clan monitor")
+        self._monitor_task = asyncio.create_task(
+            self._monitor_loop(), name="PCR real arena/clan monitor"
+        )
         logger.info("PCR assistant plugin loaded")
+
+    async def terminate(self):
+        self._monitor_task.cancel()
+        await asyncio.gather(self._monitor_task, return_exceptions=True)
+
+    def _user_allowed(self, sender_id: str) -> bool:
+        return is_allowed_qq(
+            sender_id,
+            self.admin_qq,
+            _config_get(self.config, "allowed_qqs", ""),
+            self.blocked_qqs,
+        )
+
+    def _pcr_event_allowed(
+        self, event: AstrMessageEvent, *, allow_private=False, manage_group=False
+    ) -> bool:
+        sender = numeric_sender_id_from_event(event)
+        if not self._user_allowed(sender):
+            return False
+        if manage_group:
+            return is_admin_qq(sender, self.admin_qqs, self.blocked_qqs)
+        if _is_private(event):
+            return allow_private
+        return self.storage.group_enabled(_group_key(event))
+
+    def _monitor_target_allowed(self, user_id: str, target: str | None) -> bool:
+        if not self._user_allowed(user_id):
+            return False
+        target_text = str(target or "")
+        if not target_text.startswith("session:"):
+            return False
+        parts = target_text[len("session:"):].split(":", 2)
+        if len(parts) != 3 or not parts[0]:
+            return False
+        _, message_type, session_id = parts
+        if message_type == "GroupMessage":
+            return self.storage.group_enabled(session_id)
+        return message_type == "FriendMessage" and session_id == str(user_id)
 
     def _admin_block_message(self, event: AstrMessageEvent) -> str | None:
         sender = _sender_id(event)
@@ -433,6 +479,7 @@ class PCRAssistantPlugin(Star):
         return None
 
     @filter.command(CMD_HELP)
+    @require_pcr_access(allow_private=True)
     async def pcr_help(self, event: AstrMessageEvent):
         _mark_processed(event)
         if not _is_group_feature_enabled(self.storage, event):
@@ -480,6 +527,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_GROUP_ENABLE)
+    @require_pcr_access(manage_group=True)
     async def group_enable(self, event: AstrMessageEvent):
         _mark_processed(event)
         admin_block = self._admin_block_message(event)
@@ -496,6 +544,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result("PCR \u529f\u80fd\u5df2\u5728\u672c\u7fa4\u542f\u7528\u3002")
 
     @filter.command(CMD_GROUP_DISABLE)
+    @require_pcr_access(manage_group=True)
     async def group_disable(self, event: AstrMessageEvent):
         _mark_processed(event)
         admin_block = self._admin_block_message(event)
@@ -518,6 +567,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result("PCR \u529f\u80fd\u5df2\u5728\u672c\u7fa4\u7981\u7528\u3002")
 
     @filter.command(CMD_GROUP_STATUS)
+    @require_pcr_access(manage_group=True)
     async def group_status(self, event: AstrMessageEvent):
         _mark_processed(event)
         if _is_private(event):
@@ -531,12 +581,9 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(f"\u672c\u7fa4 PCR \u529f\u80fd\uff1a{status}")
 
     @filter.command(CMD_DAILY)
+    @require_pcr_access()
     async def daily_link(self, event: AstrMessageEvent):
         _mark_processed(event)
-        admin_block = self._admin_block_message(event)
-        if admin_block:
-            yield event.plain_result(admin_block)
-            return
         if not _is_group_feature_enabled(self.storage, event):
             yield event.plain_result(GROUP_DISABLED_MESSAGE)
             return
@@ -547,26 +594,31 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_DAILY_CONFIG)
+    @require_pcr_access()
     async def daily_config_link(self, event: AstrMessageEvent):
         async for result in self.daily_link(event):
             yield result
 
     @filter.command(CMD_DAILY_HASH)
+    @require_pcr_access()
     async def daily_hash_link(self, event: AstrMessageEvent):
         async for result in self.daily_link(event):
             yield result
 
     @filter.command(CMD_DAILY_CLEAR_ALL)
+    @require_pcr_access()
     async def daily_clear_all_link(self, event: AstrMessageEvent):
         async for result in self.daily_link(event):
             yield result
 
     @filter.command(CMD_DAILY_RECORD)
+    @require_pcr_access()
     async def daily_record_link(self, event: AstrMessageEvent):
         async for result in self.daily_link(event):
             yield result
 
     @filter.command(CMD_BIND)
+    @require_pcr_access(allow_private=True)
     async def bind_account(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._blocked_message(event)
@@ -603,6 +655,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ACCOUNT)
+    @require_pcr_access(allow_private=True)
     async def account_status(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._blocked_message(event)
@@ -622,6 +675,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(f"\u5df2\u7ed1\u5b9a\uff1a{_format_account(account)}")
 
     @filter.command(CMD_UNBIND)
+    @require_pcr_access(allow_private=True)
     async def unbind_account(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._blocked_message(event)
@@ -640,6 +694,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_BIND, alias={CMD_CHANNEL_ARENA_BIND})
+    @require_pcr_access()
     async def arena_bind(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -668,6 +723,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_QUERY, alias={CMD_CHANNEL_ARENA_QUERY})
+    @require_pcr_access()
     async def arena_query(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -685,6 +741,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_HELP, alias={CMD_CHANNEL_ARENA_HELP})
+    @require_pcr_access()
     async def arena_help(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -716,6 +773,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_DELETE_BINDING, alias={CMD_CHANNEL_ARENA_DELETE_BINDING})
+    @require_pcr_access()
     async def arena_delete_binding(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -744,6 +802,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_CLEAR_BINDINGS, alias={CMD_CHANNEL_ARENA_CLEAR_BINDINGS})
+    @require_pcr_access()
     async def arena_clear_bindings(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -757,6 +816,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_SUBSCRIBE_STATUS, alias={CMD_CHANNEL_ARENA_SUBSCRIBE_STATUS})
+    @require_pcr_access()
     async def arena_subscribe_status(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -778,6 +838,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_RENAME, alias={CMD_CHANNEL_ARENA_RENAME})
+    @require_pcr_access()
     async def arena_rename(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -808,6 +869,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_SETTINGS, alias={CMD_CHANNEL_ARENA_SETTINGS})
+    @require_pcr_access()
     async def arena_settings(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -858,6 +920,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_PUSH_GROUP)
+    @require_pcr_access()
     async def arena_push_group(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -886,6 +949,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_PUSH_PRIVATE)
+    @require_pcr_access(allow_private=True)
     async def arena_push_private(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -913,6 +977,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_DETAIL_QUERY, alias={CMD_CHANNEL_ARENA_DETAIL_QUERY})
+    @require_pcr_access()
     async def arena_detail_query(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -930,6 +995,7 @@ class PCRAssistantPlugin(Star):
         )
 
     @filter.command(CMD_ARENA_RECORD, alias={CMD_CHANNEL_ARENA_RECORD})
+    @require_pcr_access()
     async def arena_record(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -940,6 +1006,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(await self.arena.history("jjc", user=_sender_id(event), account="main"))
 
     @filter.command(CMD_ARENA_DUEL_RECORD, alias={CMD_CHANNEL_ARENA_DUEL_RECORD})
+    @require_pcr_access()
     async def arena_duel_record(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -950,6 +1017,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(await self.arena.history("pjjc", user=_sender_id(event), account="main"))
 
     @filter.command(CMD_ARENA_MONITOR, alias=ARENA_MONITOR_ON_ALIASES)
+    @require_pcr_access()
     async def arena_monitor_on(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -967,6 +1035,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(await self._arena_monitor_on_reply(event))
 
     @filter.command(CMD_ARENA_CANCEL_MONITOR, alias=ARENA_MONITOR_OFF_ALIASES)
+    @require_pcr_access()
     async def arena_monitor_off(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -987,6 +1056,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(self._arena_monitor_off_reply(event))
 
     @filter.command(CMD_ARENA_STATUS, alias=ARENA_STATUS_ALIASES)
+    @require_pcr_access()
     async def arena_status(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -1003,6 +1073,7 @@ class PCRAssistantPlugin(Star):
             CMD_ARENA_KILLER_PJJC_OFF,
         },
     )
+    @require_pcr_access()
     async def arena_killer_toggle(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._arena_block_message(event)
@@ -1215,6 +1286,7 @@ class PCRAssistantPlugin(Star):
             f"#\u76d1\u63a7\u7f16\u53f7{monitor_id}"
         )
 
+    @require_pcr_access()
     async def _arena_ranking_page(self, event: AstrMessageEvent, kind: str, page: int):
         blocked = self._arena_block_message(event)
         if blocked:
@@ -1230,6 +1302,7 @@ class PCRAssistantPlugin(Star):
             await self.arena.ranking_text(kind, page=page, user=sender, account="main")
         )
 
+    @require_pcr_access()
     async def _arena_solution_query(self, event: AstrMessageEvent, region: int, payload: str):
         blocked = self._arena_block_message(event)
         if blocked:
@@ -1411,6 +1484,7 @@ class PCRAssistantPlugin(Star):
         return "\n".join(lines)
 
     @filter.command(CMD_CLAN_OUT_DAMAGE_MONITOR, alias=set(CLAN_COMMAND_ALIASES))
+    @require_pcr_access()
     async def clan_command(self, event: AstrMessageEvent):
         _mark_processed(event)
         blocked = self._blocked_message(event)
@@ -1555,7 +1629,7 @@ class PCRAssistantPlugin(Star):
 
         dirty = False
         for user_id, bindings in list(arena_data.items()):
-            if not isinstance(bindings, list):
+            if not self._user_allowed(user_id) or not isinstance(bindings, list):
                 continue
             for entry in bindings:
                 if (
@@ -1568,6 +1642,8 @@ class PCRAssistantPlugin(Star):
                 if settings[:2] == "00" and settings[3] == "0":
                     continue
                 target = entry.get("push_target")
+                if not self._monitor_target_allowed(user_id, target):
+                    continue
                 if not self.storage.get_account(user_id):
                     entry["push_target"] = None
                     entry["manual_pause"] = True
@@ -1576,6 +1652,7 @@ class PCRAssistantPlugin(Star):
                     await self._send_monitor_message(
                         target,
                         "\u7ade\u6280\u573a\u6392\u540d\u63d0\u9192\u5df2\u6682\u505c\uff1a\u5f53\u524d QQ \u6ca1\u6709\u7ed1\u5b9a\u8d26\u53f7\u3002",
+                        at_qq=str(user_id),
                     )
                     continue
                 was_paused = bool(entry.get("manual_pause"))
@@ -1605,9 +1682,10 @@ class PCRAssistantPlugin(Star):
             return
 
         dirty = False
-        for clan_state in list(clan_data.values()):
+        for group_id, clan_state in list(clan_data.items()):
             if (
-                not isinstance(clan_state, dict)
+                not self.storage.group_enabled(group_id)
+                or not isinstance(clan_state, dict)
                 or clan_state.get("manual_pause")
                 or not clan_state.get("out_damage_monitor")
             ):
@@ -1616,6 +1694,8 @@ class PCRAssistantPlugin(Star):
             if not target:
                 continue
             monitor_qq = str(clan_state.get("monitor_qq") or "").strip()
+            if not self._monitor_target_allowed(monitor_qq, f"session:{target}"):
+                continue
             if not monitor_qq or not self.storage.get_account(monitor_qq):
                 clan_state["out_damage_monitor"] = False
                 clan_state["manual_pause"] = True
@@ -1624,6 +1704,7 @@ class PCRAssistantPlugin(Star):
                 await self._send_monitor_message(
                     f"session:{target}",
                     "\u51fa\u5200\u76d1\u63a7\u5df2\u6682\u505c\uff1a\u5f53\u524d QQ \u6ca1\u6709\u7ed1\u5b9a\u8d26\u53f7\u3002",
+                    user_id=monitor_qq,
                 )
                 continue
             try:
@@ -1636,12 +1717,13 @@ class PCRAssistantPlugin(Star):
                 await self._send_monitor_message(
                     f"session:{target}",
                     f"\u51fa\u5200\u76d1\u63a7\u5df2\u6682\u505c\uff1a\u771f\u5b9e\u4f1a\u6218\u8bfb\u53d6\u5931\u8d25\uff1a{exc}",
+                    user_id=monitor_qq,
                 )
                 continue
             messages = update_clan_damage_state(clan_state, real_status)
             dirty = True
             for message in messages:
-                await self._send_monitor_message(f"session:{target}", message)
+                await self._send_monitor_message(f"session:{target}", message, user_id=monitor_qq)
 
         if dirty:
             self.storage.save()
@@ -1659,7 +1741,12 @@ class PCRAssistantPlugin(Star):
             clan_state["manual_pause"] = True
             clan_state["pause_reason"] = reason
 
-    async def _send_monitor_message(self, target: str | None, text: str, at_qq: str | None = None):
+    async def _send_monitor_message(
+        self, target: str | None, text: str, at_qq: str | None = None,
+        *, user_id: str | None = None,
+    ):
+        if not self._monitor_target_allowed(user_id or at_qq or "", target):
+            return False
         target_text = str(target or "")
         if not target_text.startswith("session:"):
             return False
@@ -1675,6 +1762,8 @@ class PCRAssistantPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def plain_text_dispatch(self, event: AstrMessageEvent, *args, **kwargs):
+        if not self._user_allowed(numeric_sender_id_from_event(event)):
+            return
         text = _message_text(event)
         if (
             bool(getattr(event, "_pcr_assistant_processed", False))
@@ -1703,7 +1792,7 @@ class PCRAssistantPlugin(Star):
             compat_match = match_compat_command(text)
             if compat_match is None:
                 return
-            if not _is_group_feature_enabled(self.storage, event):
+            if not self._pcr_event_allowed(event):
                 return
 
             _mark_processed(event)
