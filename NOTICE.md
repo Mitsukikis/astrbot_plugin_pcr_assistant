@@ -18,6 +18,12 @@
   - 角色别名/阵容解析相关数据和思路参考 KokkoroBot，KokkoroBot 使用 GPL-3.0 授权。
 - redive.estertion.win: <https://redive.estertion.win/>
   - 图片阵容识别会在运行时下载角色头像作为本地缓存。
+- 花舞公开文档: <https://docs.hwmoe.com/zh/cygames/pcr/auto_report_knife>
+  - 仅参考公开命令及监控交互，不包含或声称获得其私有后端源码。
+- HoshinoBot: <https://github.com/Ice-Cirno/HoshinoBot>；yobot_remix: <https://github.com/eggggi/yobot_remix>
+  - 参考 GPL-3.0 开源生态的会战协作及作业查询行为，未复制整个后端，数据不互通。
+- PCRJJCAnalyzer: <https://github.com/Alive24/PCRJJCAnalyzer>
+  - 参考 OpenCV 头像识别思路；本项目新增本地多变体模板、完整布局与低置信度拒识校验。
 
 ## 第三方权利
 

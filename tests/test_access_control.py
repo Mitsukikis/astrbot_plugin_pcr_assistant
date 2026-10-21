@@ -76,7 +76,7 @@ def plugin(plugin_module, tmp_path):
         login_url="https://example.com/daily/login",
     )
     instance.arena = types.SimpleNamespace(query=AsyncMock())
-    instance.real_api = types.SimpleNamespace(clan_status=AsyncMock())
+    instance.real_api = types.SimpleNamespace(clan_status=AsyncMock(return_value={'ok': True, 'damage_history': []}))
     instance.context = types.SimpleNamespace(send_message=AsyncMock())
     return instance
 
@@ -272,3 +272,39 @@ def test_terminate_cancels_background_monitor(plugin):
         await plugin.terminate()
         assert plugin._monitor_task.cancelled()
     asyncio.run(run())
+
+
+def test_no_api_key_still_identifies_and_returns_prefilled_link(plugin,plugin_module,tmp_path,monkeypatch):
+    plugin._arena_image_lock=asyncio.Lock()
+    plugin.image_recognizer=types.SimpleNamespace(
+        load_cached_templates=Mock(return_value=0),
+        recognize_teams=Mock(return_value=[{'ids':[1001,1002,1003,1004,1005],'label':'defense_1'}]),
+        get_icon=lambda cid:None,
+    )
+    plugin.pcrdfans=types.SimpleNamespace(api_key='',query=AsyncMock())
+    plugin._pcr_image_path=lambda category:str(tmp_path/(category+'.png'))
+    monkeypatch.setattr(plugin_module,'_has_image_message',lambda event:True)
+    monkeypatch.setattr(plugin_module,'_first_image_path',AsyncMock(return_value='synthetic.png'))
+    request=event(OWNER,'怎么拆')
+    request.chain_result=lambda chain:chain
+    replies=collect(plugin._arena_solution_query,request,1,'')
+    plugin.image_recognizer.recognize_teams.assert_called_once()
+    plugin.pcrdfans.query.assert_not_awaited()
+    messages=[reply for reply in replies if isinstance(reply,str)]
+    assert any('防守队伍 1' in reply for reply in messages)
+    assert any('id=100101' in reply and 'id=100501' in reply for reply in messages)
+
+
+def test_selected_personal_report_is_not_overwritten_by_mylog(plugin_module):
+    from clan_report import prepare_clan_report
+    status={'report_command':'my_report','damage_history':[{'history_id':9,'viewer_id':77,'damage':10}],'history_scope':'selected'}
+    assert prepare_clan_report(status,'my_report',{'actual_logs':[]})['damage_history']==status['damage_history']
+
+
+def test_status_render_failure_falls_back_to_text(plugin, plugin_module, monkeypatch):
+    plugin.storage.set_account(OWNER, {'kind': 'channel', 'uid': '999'})
+    plugin.real_api.clan_status.return_value = {'ok': True, 'clan': {'clan_id': 1},
+        'clan_battle': {'id': 2}, 'damage_history': []}
+    monkeypatch.setattr(plugin_module, 'render_clan_status', Mock(side_effect=RuntimeError('font missing')))
+    replies = collect(plugin.clan_command, event(OWNER, '状态'))
+    assert any(isinstance(reply, str) and '监控' in reply for reply in replies)

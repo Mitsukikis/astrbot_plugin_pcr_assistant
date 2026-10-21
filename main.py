@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+import uuid
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -14,6 +16,7 @@ from .arena_solution import (
     PcrdFansError,
     PcrdFansMissingKey,
     parse_solution_command,
+    pcrdfans_battle_url,
 )
 from .arena_state import (
     apply_arena_settings,
@@ -40,12 +43,19 @@ from .clan_access import (
     clan_command_needs_account,
     make_monitor_id,
 )
-from .clan_report import build_current_report_text, build_damage_count_summary, render_text_image
-from .clan_state import build_clan_command_reply, clan_state_update_for_command
+from .clan_report import (
+    build_current_report_text, build_damage_count_summary, render_text_image,
+    render_clan_report, render_clan_status,
+)
+from .clan_history import merge_clan_history, select_clan_report
+from .clan_coordination import COORDINATION_COMMANDS, handle_clan_coordination
+from .clan_state import build_clan_command_reply, build_clan_status_text, clan_state_update_for_command
 from .compat_commands import build_compat_reply, match_compat_command
 from .monitoring import update_arena_entry_from_result, update_clan_damage_state
 from .pcr_image_recognizer import ImageRecognitionError, PcrImageRecognizer
 from .pcr_chara import parse_team_names
+from .pcr_chara import name_for_id, extend_character_roster, load_character_roster
+from .pcr_cards import render_arena_recognition, render_arena_solutions, render_clan_damage_detail
 from .real_api_client import PCRRealAPIClient, RealAPIError
 from .command_router import (
     ARENA_COMMANDS,
@@ -119,7 +129,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.2.0"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
@@ -132,12 +142,18 @@ CMD_HELP = "pcr\u5e2e\u52a9"
 CMD_BIND = "pcr\u7ed1\u5b9a"
 CMD_ACCOUNT = "pcr\u8d26\u53f7"
 CMD_UNBIND = "pcr\u89e3\u7ed1"
+CMD_ARENA_TEMPLATES = "竞技场更新卡池"
+CMD_ARENA_CONTINUOUS = "#怎么拆"
+CMD_ARENA_CONTINUOUS_END = "结束查询"
 PRIVATE_ACCOUNT_COMMANDS = (
     CMD_BIND,
     CMD_ACCOUNT,
     CMD_UNBIND,
 )
 PLAIN_COMMANDS = (
+    CMD_ARENA_TEMPLATES,
+    CMD_ARENA_CONTINUOUS,
+    CMD_ARENA_CONTINUOUS_END,
     CMD_HELP,
     *GROUP_CONTROL_COMMANDS,
     *DAILY_LINK_COMMANDS,
@@ -388,6 +404,8 @@ class PCRAssistantPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config
+        self._arena_image_lock = asyncio.Lock()
+        self._arena_image_sessions = {}
         self.admin_qq = _config_get(config, "admin_qq", DEFAULT_ADMIN_QQ)
         self.admin_qqs = _config_qq_set(config, "admin_qqs", "")
         self.admin_qqs.update(parse_qq_list(self.admin_qq))
@@ -395,6 +413,8 @@ class PCRAssistantPlugin(Star):
             self.admin_qqs = {DEFAULT_ADMIN_QQ}
         self.blocked_qqs = _config_qq_set(config, "blocked_qqs", "")
         data_dir = os.path.join(os.path.dirname(__file__), "data")
+        self._chara_cache = os.path.join(data_dir, 'characters.json')
+        load_character_roster(self._chara_cache)
         self.storage = PCRStorage(os.path.join(data_dir, "state.json"))
         try:
             self.image_recognizer = PcrImageRecognizer(
@@ -516,11 +536,13 @@ class PCRAssistantPlugin(Star):
             "\u67e5\u8be2 pcrdfans \u7ade\u6280\u573a\u4f5c\u4e1a\uff0c\u652f\u6301 b\u600e\u4e48\u62c6/\u53f0\u600e\u4e48\u62c6/\u65e5\u600e\u4e48\u62c6\n"
             f"{CMD_CLAN_OUT_DAMAGE_MONITOR}/{CMD_CLAN_OUT_DAMAGE_MONITOR_CLOSE}\uff1a"
             "\u7fa4\u51fa\u5200\u76d1\u63a7\u5f00\u5173\n"
-            "\u72b6\u6001\uff1a\u67e5\u770b\u7fa4\u4f1a\u6218\u672c\u5730\u72b6\u6001\n"
+            "状态：五王血量、阶段、正在挑战人数图片\n"
             "\u5f53\u524d\u6218\u62a5/\u6211\u7684\u6218\u62a5/\u4eca\u65e5\u6218\u62a5/"
-            "\u51fa\u5200\u8be6\u60c5\uff1a\u67e5\u8be2\u771f\u5b9e\u4f1a\u6218\u8bb0\u5f55\n"
+            "出刀详情 history_id：查询真实会战记录图片\n"
             "\u9884\u7ea6/\u67e5\u6811/sl/\u7533\u8bf7\u51fa\u5200/\u6743\u9650\uff1a"
-            "\u540e\u7aef\u63a5\u5165\u4e2d\u5360\u4f4d\u6307\u4ee4\n"
+            "本群登记（按QQ隔离，不执行游戏操作）\n"
+            "怎么拆 + 游戏原图：识别右侧防守阵容；无Key提供带阵容作业网链接\n"
+            "竞技场更新卡池：更新头像；#怎么拆/结束查询：连续识图开关\n"
             "\u5f00\u542f\u624b\u52a8\u62a5\u5200/\u5173\u95ed\u624b\u52a8\u62a5\u5200/"
             "\u5f00\u542f\u56fe\u7247\u6a21\u5f0f/\u5173\u95ed\u56fe\u7247\u6a21\u5f0f\uff1a"
             "\u4fdd\u5b58\u672c\u5730\u7fa4\u72b6\u6001"
@@ -1304,65 +1326,114 @@ class PCRAssistantPlugin(Star):
 
     @require_pcr_access()
     async def _arena_solution_query(self, event: AstrMessageEvent, region: int, payload: str):
-        blocked = self._arena_block_message(event)
-        if blocked:
-            yield event.plain_result(blocked)
+        teams = []
+        image_path = None
+        if _has_image_message(event):
+            if self.image_recognizer is None:
+                yield event.plain_result("识图组件未就绪，请使用文字角色名查询。")
+                return
+            yield event.plain_result("正在识别截图中的防守阵容，请稍候。")
+            try:
+                image_path = await _first_image_path(event)
+                if not image_path:
+                    raise ImageRecognitionError("未能读取图片")
+                side = 'all' if payload.strip() == '全部' else 'defense'
+                async with self._arena_image_lock:
+                    await asyncio.to_thread(self.image_recognizer.load_cached_templates)
+                    teams = await asyncio.to_thread(
+                        self.image_recognizer.recognize_teams, image_path, side=side
+                    )
+            except (ImageRecognitionError, OSError, ValueError) as exc:
+                yield event.plain_result(f"阵容识别失败：{exc}\n请发送清晰的游戏原图，或裁剪为五人头像横排。")
+                return
+        elif payload.strip():
+            for number, text in enumerate(payload.split('#')[:4], 1):
+                ids, unknown = parse_team_names(text)
+                if unknown or len(ids) != 5 or len(set(ids)) != 5:
+                    yield event.plain_result(f"第{number}队解析失败：需要五名不重复角色。无法识别的内容：{unknown or '-'}")
+                    return
+                teams.append({'ids': ids, 'label': f'防守队伍 {number}'})
+        else:
+            yield event.plain_result("请发送“怎么拆”并附上阵容截图，或“怎么拆 五名角色”。多队文字使用 # 分隔。")
+            return
+        if not teams or len(teams) > (6 if payload.strip() == '全部' else 3):
+            yield event.plain_result("一次支持一至三队防守阵容；完整对战图默认读取右侧三队。")
             return
 
-        defender_ids: list[int] = []
-        if not payload.strip():
-            if _has_image_message(event):
-                if self.image_recognizer is None:
-                    yield event.plain_result("\u5f53\u524d\u73af\u5883\u65e0\u6cd5\u542f\u7528\u56fe\u7247\u9635\u5bb9\u8bc6\u522b\uff0c\u8bf7\u6539\u7528\u6587\u5b57\u67e5\u8be2\u3002")
-                    return
-                if not getattr(self.pcrdfans, "api_key", ""):
-                    yield event.plain_result(f"\u7ade\u6280\u573a\u4f5c\u4e1a\u67e5\u8be2\u5931\u8d25\uff1a{PcrdFansMissingKey()}")
-                    return
-                yield event.plain_result("\u6b63\u5728\u8bc6\u522b\u9635\u5bb9\u56fe\u7247\uff0c\u9996\u6b21\u4f7f\u7528\u9700\u8981\u4e0b\u8f7d\u5934\u50cf\u6a21\u677f\uff0c\u8bf7\u7a0d\u7b49\u3002")
-                try:
-                    image_path = await _first_image_path(event)
-                    if not image_path:
-                        raise ImageRecognitionError("\u672a\u80fd\u8bfb\u53d6\u56fe\u7247\u6587\u4ef6")
-                    defender_ids = await asyncio.to_thread(
-                        self.image_recognizer.recognize_file,
-                        image_path,
-                    )
-                except ImageRecognitionError as exc:
-                    yield event.plain_result(
-                        f"\u9635\u5bb9\u56fe\u7247\u8bc6\u522b\u5931\u8d25\uff1a{exc}\n"
-                        "\u8bf7\u5c3d\u91cf\u53d1\u9001\u53ea\u542b 5 \u4e2a\u5934\u50cf\u7684\u6a2a\u5411\u56fe\uff0c"
-                        "\u6216\u6539\u7528\u6587\u5b57\uff1a\u600e\u4e48\u62c6 \u5bab\u5b50 \u601c(\u65b0\u5e74) \u7231\u871c\u8389\u96c5 \u971e(\u9b54\u6cd5\u5c11\u5973) \u4f3c\u4f3c\u82b1"
-                    )
-                    return
-            else:
-                yield event.plain_result(
-                    "\u67e5\u8be2\u8bf7\u53d1\u9001\uff1a\u600e\u4e48\u62c6 \u9632\u5b88\u961f\u4f0d\n"
-                    "\u4f8b\uff1a\u600e\u4e48\u62c6 \u5bab\u5b50 \u601c(\u65b0\u5e74) \u7231\u871c\u8389\u96c5 \u971e(\u9b54\u6cd5\u5c11\u5973) \u4f3c\u4f3c\u82b1"
-                )
-                return
-        if not defender_ids:
-            defender_ids, unknown = parse_team_names(payload)
-            if unknown:
-                yield event.plain_result(f'\u65e0\u6cd5\u8bc6\u522b"{unknown}"\uff0c\u8bf7\u6362\u7528\u89d2\u8272\u5168\u540d\u6216\u5e38\u7528\u5916\u53f7\u3002')
-                return
-        if len(defender_ids) != 5:
-            yield event.plain_result("\u9632\u5b88\u961f\u4f0d\u5fc5\u987b\u521a\u597d 5 \u540d\u89d2\u8272\u3002")
-            return
-        if len(set(defender_ids)) != 5:
-            yield event.plain_result("\u9632\u5b88\u961f\u4f0d\u4e2d\u542b\u91cd\u590d\u89d2\u8272\u3002")
-            return
-        if not getattr(self.pcrdfans, "api_key", ""):
-            yield event.plain_result(f"\u7ade\u6280\u573a\u4f5c\u4e1a\u67e5\u8be2\u5931\u8d25\uff1a{PcrdFansMissingKey()}")
-            return
-
-        yield event.plain_result("\u6b63\u5728\u67e5\u8be2 pcrdfans \u7ade\u6280\u573a\u4f5c\u4e1a\uff0c\u8bf7\u7a0d\u7b49\u3002")
+        icon_provider = self.image_recognizer.get_icon if self.image_recognizer else None
+        for i, team in enumerate(teams, 1):
+            label = str(team.get('label') or '')
+            for prefix, translated in (('defense_', '防守队伍 '), ('attack_', '进攻队伍 '), ('team_', '队伍 ')):
+                if label.startswith(prefix):
+                    team['label'] = translated + label[len(prefix):]
+        names = '\n'.join(
+            f"{team.get('label') or f'第{i}队'}：" + ' '.join(name_for_id(cid) for cid in team['ids'])
+            for i, team in enumerate(teams, 1)
+        )
+        yield event.plain_result(names)
+        path = self._pcr_image_path('arena_recognition')
         try:
-            result = await self.pcrdfans.query(defender_ids, _sender_id(event), region=region)
-        except PcrdFansError as exc:
-            yield event.plain_result(f"\u7ade\u6280\u573a\u4f5c\u4e1a\u67e5\u8be2\u5931\u8d25\uff1a{exc}")
+            await asyncio.to_thread(render_arena_recognition, teams, path, icon_provider)
+            yield event.chain_result(MessageChain().file_image(str(path)).chain)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning(f"PCR recognition card render failed: {type(exc).__name__}")
+        recognition_only = payload.strip() == '全部' or _normalized_text(event).startswith(('识别阵容', '阵容识别'))
+        if recognition_only:
             return
+        if not getattr(self.pcrdfans, 'api_key', ''):
+            links = '\n'.join(f"第{i}队作业：{pcrdfans_battle_url(t['ids'])}" for i,t in enumerate(teams, 1))
+            yield event.plain_result("角色识别已完成。尚未配置 pcrdfans 授权 Key，当前不能在机器人内自动取得解法。以下链接已带入识别阵容：\n" + links)
+            return
+        for number, team in enumerate(teams, 1):
+            try:
+                result = await self.pcrdfans.query(team['ids'], _sender_id(event), region=region)
+            except PcrdFansError as exc:
+                yield event.plain_result(f"第{number}队解法查询失败：{exc}")
+                continue
+            path = self._pcr_image_path('arena_solutions')
+            try:
+                await asyncio.to_thread(
+                    render_arena_solutions, team['ids'], result.entries, path, icon_provider, region
+                )
+                yield event.chain_result(MessageChain().file_image(str(path)).chain)
+            except (OSError, ValueError, RuntimeError):
+                yield event.plain_result(result.format_text())
 
-        yield event.plain_result(result.format_text())
+    def _pcr_image_path(self, category):
+        return os.path.join(os.path.dirname(__file__), 'data', 'reports', f'{category}_{uuid.uuid4().hex}.png')
+
+    @filter.command(CMD_ARENA_TEMPLATES)
+    @require_pcr_access()
+    async def arena_update_templates(self, event: AstrMessageEvent):
+        _mark_processed(event)
+        if self._admin_block_message(event):
+            return
+        if self.image_recognizer is None:
+            yield event.plain_result("识图组件未就绪。")
+            return
+        yield event.plain_result("正在更新角色头像库，请稍候。")
+        async with self._arena_image_lock:
+            try:
+                roster = await self.real_api.characters()
+                extend_character_roster(roster.get('characters', []), self._chara_cache)
+            except RealAPIError:
+                pass
+            result = await asyncio.to_thread(self.image_recognizer.warm_templates)
+        yield event.plain_result(f"角色头像库更新完成：{result}")
+
+    @filter.command(CMD_ARENA_CONTINUOUS)
+    @require_pcr_access()
+    async def arena_continuous_start(self, event: AstrMessageEvent):
+        _mark_processed(event)
+        self._arena_image_sessions[(_sender_id(event), _group_key(event))] = time.monotonic() + 600
+        yield event.plain_result("已开启连续识图，十分钟内发送阵容截图即可查询。发送“结束查询”退出。")
+
+    @filter.command(CMD_ARENA_CONTINUOUS_END)
+    @require_pcr_access()
+    async def arena_continuous_end(self, event: AstrMessageEvent):
+        _mark_processed(event)
+        self._arena_image_sessions.pop((_sender_id(event), _group_key(event)), None)
+        yield event.plain_result("已结束连续识图。")
 
     async def _arena_status_reply(self, event: AstrMessageEvent) -> str:
         ensure_message = await self._ensure_default_arena_binding(event)
@@ -1512,18 +1583,38 @@ class PCRAssistantPlugin(Star):
         clan = self.storage.data.get("clan", {}).get(group_key, {})
         account_qq = clan_command_account_qq(sender, clan)
         account = self.storage.get_account(account_qq) if account_qq else None
+        payload = _payload_after(event, command)
+        if command_key in COORDINATION_COMMANDS:
+            name = clan.get('monitor_player_name') if clan.get('monitor_qq') == sender else ''
+            local_reply = handle_clan_coordination(
+                command_key, payload, clan, sender,
+                player_name=name or (account or {}).get('user_name', ''),
+                is_admin=is_admin_qq(sender, self.admin_qqs, self.blocked_qqs),
+            )
+            self.storage.set_clan_state(group_key, clan)
+            yield event.plain_result(local_reply)
+            return
         if clan_command_needs_account(command_key) and not account:
             yield event.plain_result(NO_BOUND_ACCOUNT_MESSAGE)
             return
 
+        if command_key == 'out_damage_monitor_on':
+            yield event.plain_result('正在读取你的游戏账号与公会数据，请稍候。')
         real_status, real_mylog, real_error = await self._clan_real_payload(
             command_key,
             user=account_qq,
             account="main" if account else None,
         )
-        if command_key == "out_damage_monitor_on" and real_error:
-            yield event.plain_result(f"\u767b\u5f55\u6216\u8bfb\u53d6\u4f1a\u6218\u72b6\u6001\u5931\u8d25\uff1a{real_error}")
+        if real_error:
+            yield event.plain_result(f"读取真实会战数据失败：{real_error}")
             return
+
+        if real_status:
+            real_status = merge_clan_history(clan, real_status)
+            clan['monitor_player_name'] = (real_status.get('account') or {}).get('user_name') or ''
+            if command_key == 'out_damage_monitor_on':
+                update_clan_damage_state(clan, real_status)
+            self.storage.set_clan_state(group_key, clan)
 
         updates = clan_state_update_for_command(command_key, sender)
         if command_key == "out_damage_monitor_on":
@@ -1532,6 +1623,53 @@ class PCRAssistantPlugin(Star):
         if updates:
             self.storage.set_clan_state(group_key, updates)
             clan = self.storage.data.get("clan", {}).get(group_key, {})
+
+        report_commands = {
+            'current_report', 'my_report', 'today_report', 'yesterday_report',
+            'today_damage', 'yesterday_damage', 'damage_detail',
+        }
+        if real_status and command_key in report_commands:
+            try:
+                real_status = select_clan_report(real_status, command_key, payload)
+                if command_key == 'damage_detail':
+                    detail = await self.real_api.clan_history_detail(
+                        real_status['report_history_id'], user=account_qq, account='main'
+                    )
+                    real_status['unit_damage_detail'] = detail.get('units') or []
+            except (ValueError, RealAPIError) as exc:
+                yield event.plain_result(str(exc))
+                return
+            path = self._pcr_image_path('clan_report')
+            if clan.get('image_mode', True) is False and command_key != 'damage_detail':
+                yield event.plain_result(build_current_report_text(real_status))
+                return
+            try:
+                if command_key == 'damage_detail':
+                    provider = self.image_recognizer.get_icon if self.image_recognizer else None
+                    await asyncio.to_thread(render_clan_damage_detail, real_status, path, provider)
+                else:
+                    await asyncio.to_thread(render_clan_report, real_status, path, command_key)
+                yield event.chain_result(MessageChain().file_image(str(path)).chain)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning(f'PCR clan report image failed: {type(exc).__name__}')
+                yield event.plain_result(build_current_report_text(real_status))
+            return
+        if real_status and command_key == 'status':
+            if clan.get('image_mode', True) is False:
+                yield event.plain_result(build_clan_status_text(real_status, clan, account))
+                return
+            path = self._pcr_image_path('clan_status')
+            try:
+                await asyncio.to_thread(render_clan_status, real_status, path, clan, account)
+                yield event.chain_result(MessageChain().file_image(str(path)).chain)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning(f'PCR clan status image failed: {type(exc).__name__}')
+                yield event.plain_result(build_clan_status_text(real_status, clan, account))
+            return
+        if real_status and command_key == 'urge':
+            today = select_clan_report(real_status, 'today_damage')
+            yield event.plain_result(build_damage_count_summary(today))
+            return
 
         reply = build_clan_command_reply(
             command_key,
@@ -1566,6 +1704,7 @@ class PCRAssistantPlugin(Star):
         account: str | None = None,
     ):
         status_commands = {
+            'urge',
             "out_damage_monitor_on",
             "status",
             "current_report",
@@ -1576,19 +1715,12 @@ class PCRAssistantPlugin(Star):
             "yesterday_report",
             "yesterday_damage",
         }
-        mylog_commands = {
-            "my_report",
-            "yesterday_report",
-            "yesterday_damage",
-        }
         if command_key not in status_commands:
             return None, None, None
 
         try:
             real_status = await self.real_api.clan_status(user, account=account)
             real_mylog = None
-            if command_key in mylog_commands:
-                real_mylog = await self.real_api.clan_mylog(user, account=account)
             return real_status, real_mylog, None
         except RealAPIError as exc:
             return None, None, str(exc)
@@ -1721,6 +1853,7 @@ class PCRAssistantPlugin(Star):
                 )
                 continue
             messages = update_clan_damage_state(clan_state, real_status)
+            merge_clan_history(clan_state, real_status)
             dirty = True
             for message in messages:
                 await self._send_monitor_message(f"session:{target}", message, user_id=monitor_qq)
@@ -1765,10 +1898,7 @@ class PCRAssistantPlugin(Star):
         if not self._user_allowed(numeric_sender_id_from_event(event)):
             return
         text = _message_text(event)
-        if (
-            bool(getattr(event, "_pcr_assistant_processed", False))
-            or bool(getattr(event, "is_at_or_wake_command", False))
-        ):
+        if bool(getattr(event, "_pcr_assistant_processed", False)):
             return
 
         solution_command = parse_solution_command(text)
@@ -1785,6 +1915,16 @@ class PCRAssistantPlugin(Star):
             kind, page = arena_ranking
             async for result in self._arena_ranking_page(event, kind, page):
                 yield result
+            return
+
+        expires = getattr(self, '_arena_image_sessions', {}).get((_sender_id(event), _group_key(event)), 0)
+        if expires > time.monotonic() and _has_image_message(event) and self._pcr_event_allowed(event):
+            _mark_processed(event)
+            async for result in self._arena_solution_query(event, 1, ''):
+                yield result
+            return
+
+        if bool(getattr(event, 'is_at_or_wake_command', False)):
             return
 
         command = match_plain_command(text, PLAIN_COMMANDS)
@@ -1807,6 +1947,9 @@ class PCRAssistantPlugin(Star):
 
         _mark_processed(event)
         handlers = {
+            CMD_ARENA_TEMPLATES: self.arena_update_templates,
+            CMD_ARENA_CONTINUOUS: self.arena_continuous_start,
+            CMD_ARENA_CONTINUOUS_END: self.arena_continuous_end,
             CMD_HELP: self.pcr_help,
             CMD_GROUP_ENABLE: self.group_enable,
             CMD_GROUP_DISABLE: self.group_disable,

@@ -1,7 +1,17 @@
 try:
     from .storage import mask_value
+    from .clan_report import (
+        _flag, _member_name, _members, _number, _viewer_id, build_current_report_text,
+        build_damage_count_summary, prepare_clan_report,
+    )
+    from .monitoring import _active_battle_count, _boss_order
 except ImportError:
     from storage import mask_value
+    from clan_report import (
+        _flag, _member_name, _members, _number, _viewer_id, build_current_report_text,
+        build_damage_count_summary, prepare_clan_report,
+    )
+    from monitoring import _active_battle_count, _boss_order
 
 
 COMMAND_TITLES = {
@@ -87,7 +97,7 @@ def build_clan_command_reply(command_key, state, account, real_status=None, real
     if command_key == "out_damage_monitor_on" and real_status:
         return _build_monitor_start_reply(clan_state, account, real_status)
     if command_key == "out_damage_monitor_off":
-        return _build_monitor_reply(False, clan_state, account)
+        return '出刀监控已关闭。'
 
     if real_status:
         return _build_real_reply(title, command_key, clan_state, account, real_status, real_mylog)
@@ -177,16 +187,22 @@ def _build_status_reply(title, clan_state, account):
 
 def _build_toggle_reply(title, command_key):
     enabled = command_key.endswith("_on")
-    return (
-        f"{title}\uff1a\u672c\u5730\u72b6\u6001{_enabled_text(enabled)}\n"
-        f"{BACKEND_PENDING}\n"
-        f"{LOCAL_ONLY}"
-    )
+    return f'{title}：{_enabled_text(enabled)}。'
 
 
 def _build_real_reply(title, command_key, clan_state, account, real_status, real_mylog):
     if not isinstance(real_status, dict):
         return _build_status_reply(title, clan_state, account)
+
+    if command_key == "status":
+        return f"{title}\uff1a\n{build_clan_status_text(real_status, clan_state, account)}"
+    if command_key in {
+        "current_report", "today_report", "yesterday_report", "my_report",
+        "today_damage", "yesterday_damage", "damage_detail",
+    }:
+        scoped = prepare_clan_report(real_status, command_key, real_mylog)
+        formatter = build_damage_count_summary if command_key in {"today_damage", "yesterday_damage"} else build_current_report_text
+        return f"{title}\uff1a\n{formatter(scoped)}"
 
     lines = [f"{title}\uff1a"]
     lines.extend(_real_header_lines(clan_state, account, real_status))
@@ -213,27 +229,111 @@ def _real_header_lines(clan_state, account, real_status):
     monitor_qq = clan_state.get("monitor_qq")
     if monitor_qq:
         lines.append(f"\u76d1\u63a7QQ\uff1a{monitor_qq}")
+    lines.append(f"\u76d1\u63a7\u73a9\u5bb6\uff1a{_player_name(account, real_status)}")
     account_text = _format_account(account) or _format_real_account(real_status.get("account"))
     if account_text:
         lines.append(f"\u76d1\u63a7\u8d26\u53f7\uff1a{account_text}")
 
-    clan = real_status.get("clan") or {}
-    battle = real_status.get("clan_battle") or {}
-    if clan.get("clan_name"):
-        lines.append(f"\u516c\u4f1a\uff1a{clan.get('clan_name')}({clan.get('clan_id', '-')})")
+    clan = real_status.get("clan")
+    clan = clan if isinstance(clan, dict) else {}
+    battle = real_status.get("clan_battle")
+    battle = battle if isinstance(battle, dict) else {}
+    clan_name = _member_name({"name": clan.get("clan_name")}) or "\u672a\u77e5"
+    lines.append(f"\u516c\u4f1a\uff1a{clan_name}({clan.get('clan_id', '-')})")
     if battle.get("id"):
         lines.append(f"clan_battle_id\uff1a{battle.get('id')}")
-    if battle.get("lap_num") or battle.get("period"):
-        lines.append(
-            f"\u8fdb\u5ea6\uff1a{battle.get('period', '-')}\u9636 "
-            f"{battle.get('lap_num', '-')}\u5468\u76ee"
-        )
-    if battle.get("own_rank") is not None or battle.get("period_rank") is not None:
-        lines.append(
-            f"\u6392\u540d\uff1a\u672c\u4f1a {battle.get('own_rank', '-')} / "
-            f"\u672c\u9636 {battle.get('period_rank', '-')}"
-        )
+    phases = sorted({row["phase"] for row in build_clan_status_rows(real_status) if row["phase"] is not None})
+    phase = phases[0] if len(phases) == 1 else None
+    if len(phases) > 1:
+        phase = "\u5404\u738b\u9636\u6bb5\u4e0d\u540c\uff0c\u8be6\u89c1\u4e0b\u65b9"
+    lines.append(f"\u9636\u6bb5\uff1a{phase if phase is not None else '\u672a\u77e5'}")
+    if battle.get("period") is not None:
+        lines.append(f"\u4f1a\u6218\u671f\u6b21\uff1a{battle['period']}")
+    rank = _first_value(battle, "own_rank", "clan_rank")
+    if rank is None:
+        rank = _first_value(clan, "rank", "clan_rank")
+    lines.append(f"\u516c\u4f1a\u6392\u540d\uff1a{rank if rank is not None else '\u672a\u77e5'}")
+    if battle.get("period_rank") is not None:
+        lines.append(f"\u672c\u671f\u6392\u540d\uff1a{battle['period_rank']}")
     return lines
+
+
+def build_clan_status_text(real_status, clan_state=None, account=None):
+    """Describe all five bosses; never derive max HP or locks from lap numbers."""
+    status = real_status if isinstance(real_status, dict) else {}
+    lines = _real_header_lines(clan_state or {}, account, status)
+    lines.append("")
+    for row in build_clan_status_rows(status):
+        lap = f"{row['lap_num']}\u5468\u76ee" if row["lap_num"] is not None else "\u5468\u76ee\u672a\u77e5"
+        phase = f"{row['phase']}\u9636\u6bb5" if row["phase"] is not None else "\u9636\u6bb5\u672a\u77e5"
+        hp = f"{row['current_hp']:,}" if row["current_hp"] is not None else "\u672a\u77e5"
+        maximum = f"{row['max_hp']:,}" if row["max_hp"] is not None else "\u672a\u77e5"
+        challenge = _challenge_text(row["can_challenge"])
+        active = f" | \u5f53\u524d{row['attacking_count']}\u4eba\u51fa\u5200" if row["attacking_count"] is not None else ""
+        lines.extend([
+            f"{row['order_num']}\u738b | {lap} | {phase} | {challenge}{active}",
+            f"\u5f53\u524d\u8840\u91cf {hp} / \u6700\u5927\u8840\u91cf {maximum} | \u6bd4\u4f8b {row['hp_percent']}",
+        ])
+    return "\n".join(lines)
+
+
+def build_clan_status_rows(real_status):
+    status = real_status if isinstance(real_status, dict) else {}
+    bosses = status.get("boss_info")
+    bosses = bosses if isinstance(bosses, list) else []
+    by_order = {}
+    for item in bosses:
+        if not isinstance(item, dict):
+            continue
+        order = _number(_boss_order(item))
+        if order in range(1, 6):
+            by_order[order] = item
+    rows = []
+    for order in range(1, 6):
+        boss = by_order.get(order, {})
+        enemy = boss.get("enemy")
+        enemy = enemy if isinstance(enemy, dict) else {}
+        hp = _number(_first_value(boss, "current_hp", "hp", "boss_hp"))
+        maximum = _number(_first_value(boss, "max_hp", "max_boss_hp", "hp_max"))
+        if maximum is None:
+            maximum = _number(enemy.get("max_hp"))
+        hp = hp if hp is not None and hp >= 0 else None
+        maximum = maximum if maximum is not None and maximum > 0 else None
+        can_challenge = None
+        for key in ("can_challenge", "is_challengeable", "is_unlocked"):
+            flag = _flag(boss.get(key))
+            if flag is not None:
+                can_challenge = flag
+                break
+        if can_challenge is None:
+            for key in ("is_locked", "is_unavailable", "cannot_challenge"):
+                flag = _flag(boss.get(key))
+                if flag is not None:
+                    can_challenge = not flag
+                    break
+        rows.append({
+            "order_num": order, "lap_num": _number(boss.get("lap_num")),
+            "phase": _number(_first_value(boss, "phase", "phase_num", "stage")),
+            "current_hp": hp, "max_hp": maximum, "can_challenge": can_challenge,
+            "hp_percent": f"{hp / maximum * 100:.2f}%" if hp is not None and maximum else "\u672a\u77e5",
+            "attacking_count": _active_battle_count(boss),
+        })
+    return rows
+
+
+def _first_value(payload, *keys):
+    for key in keys:
+        if payload.get(key) is not None:
+            return payload[key]
+    return None
+
+
+def _challenge_text(can_challenge):
+    if can_challenge is False:
+        return "\u65e0\u6cd5\u6311\u6218"
+    if can_challenge is True:
+        return "\u53ef\u6311\u6218"
+    return "\u6311\u6218\u72b6\u6001\u672a\u77e5"
 
 
 def _format_damage_history(items):
@@ -274,18 +374,21 @@ def _format_real_account(account):
 
 
 def _player_name(account, real_status):
-    if isinstance(account, dict):
-        value = account.get("nickname") or account.get("name") or account.get("user_name")
-        if value:
-            return str(value)
-    if isinstance(real_status, dict):
-        real_account = real_status.get("account")
-        if isinstance(real_account, dict):
-            value = real_account.get("user_name") or real_account.get("name") or real_account.get("nickname")
-            if value:
-                return str(value)
-    account_text = _format_account(account)
-    return account_text or "\u672a\u77e5\u73a9\u5bb6"
+    status = real_status if isinstance(real_status, dict) else {}
+    real_account = status.get("account")
+    real_account = real_account if isinstance(real_account, dict) else {}
+    value = _member_name({"name": real_account.get("user_name") or real_account.get("name")})
+    if value:
+        return value
+    viewer_id = _viewer_id(real_account) or _viewer_id(account)
+    if viewer_id:
+        for member in _members(status):
+            if _viewer_id(member) == viewer_id and _member_name(member):
+                return _member_name(member)
+    # A bound account's nickname can be a local label, not an in-game name.
+    if isinstance(account, dict) and account.get("user_name"):
+        return _member_name({"user_name": account["user_name"]})
+    return "\u672a\u77e5\u73a9\u5bb6"
 
 
 def _format_number(value):

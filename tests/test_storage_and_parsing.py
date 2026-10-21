@@ -335,7 +335,7 @@ def test_out_damage_monitor_reply_matches_standard_start_format():
         "out_damage_monitor_on",
         {"out_damage_monitor": True, "monitor_qq": "10001", "monitor_id": "HN00023"},
         {"kind": "channel", "uid": "1234567890123456789012", "nickname": "\u6d4b\u8bd5\u73a9\u5bb6"},
-        real_status={"account": {"uid": "1234567890123456789012"}},
+        real_status={"account": {"uid": "1234567890123456789012", "user_name": "\u6d4b\u8bd5\u73a9\u5bb6"}},
     )
 
     assert "\u6b63\u5728\u767b\u5f55\u8d26\u53f7\uff0c\u8bf7\u8010\u5fc3\u7b49\u5f85" in reply

@@ -1,5 +1,7 @@
 import re
 import unicodedata
+import json
+from pathlib import Path
 
 try:
     from .pcr_chara_data import CHARA_NAME
@@ -88,3 +90,38 @@ _ROSTER = CharaRoster()
 
 def parse_team_names(text: str) -> tuple[list[int], str]:
     return _ROSTER.parse_team(text)
+
+
+def extend_character_roster(characters, cache_path=None):
+    global _ROSTER
+    accepted = []
+    for item in list(characters or [])[:1024]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            cid = int(item['id'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        name = str(item.get('name') or '').strip()
+        if not 1001 <= cid < 2000 or not name or len(name) > 100:
+            continue
+        existing = CHARA_NAME.setdefault(cid, [])
+        if name not in existing:
+            existing.insert(0, name)
+        accepted.append({'id': cid, 'name': name})
+    _ROSTER = CharaRoster()
+    if cache_path is not None:
+        path = Path(cache_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix('.tmp')
+        temp.write_text(json.dumps(accepted, ensure_ascii=False), encoding='utf-8')
+        temp.replace(path)
+    return len(accepted)
+
+
+def load_character_roster(cache_path):
+    try:
+        data = json.loads(Path(cache_path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return 0
+    return extend_character_roster(data if isinstance(data, list) else [])

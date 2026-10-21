@@ -115,8 +115,17 @@ class PCRRealAPIClient:
     async def clan_status(self, user: str | None = None, account: str | None = None) -> dict:
         return await self.get_json("clan/status", {"user": user, "account": account})
 
+    async def characters(self) -> dict:
+        return await self.get_json('characters')
+
     async def clan_mylog(self, user: str | None = None, account: str | None = None) -> dict:
         return await self.get_json("clan/mylog", {"user": user, "account": account})
+
+    async def clan_history_detail(self, history_id, user=None, account=None) -> dict:
+        return await self.get_json(
+            "clan/history-detail",
+            {"history_id": history_id, "user": user, "account": account},
+        )
 
     async def upsert_account(
         self,

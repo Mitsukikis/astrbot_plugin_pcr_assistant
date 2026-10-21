@@ -10,6 +10,7 @@ def make_monitor_id(group_key, sender_id):
 
 def clan_command_needs_account(command_key):
     return command_key in {
+        "urge",
         "out_damage_monitor_on",
         "status",
         "current_report",

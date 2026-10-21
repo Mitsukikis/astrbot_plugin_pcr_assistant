@@ -1,10 +1,12 @@
 import asyncio
 import base64
 import json
+import hashlib
 import time
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 try:
     from .pcr_chara import id_from_unit_id, name_for_id, unit_id_from_id
@@ -14,6 +16,9 @@ except ImportError:
 
 PCRDFANS_SEARCH_URL = "https://api.pcrdfans.com/x/v1/search"
 SOLUTION_ALIASES = (
+    "作业网查询",
+    "识别阵容",
+    "阵容识别",
     "\u600e\u4e48\u62c6",
     "\u600e\u4e48\u89e3",
     "\u600e\u4e48\u6253",
@@ -35,6 +40,12 @@ REGION_PREFIXES = {
 
 class PcrdFansError(RuntimeError):
     pass
+
+
+def pcrdfans_battle_url(defender_ids):
+    return 'https://www.pcrdfans.com/battle?' + urlencode([
+        ('id', unit_id_from_id(cid)) for cid in defender_ids
+    ])
 
 
 class PcrdFansMissingKey(PcrdFansError):
@@ -152,7 +163,6 @@ def format_arena_solution_text(defender_ids: list[int], entries: list[dict], reg
         down = int(entry.get("down") or 0) + int(entry.get("my_down") or 0)
         lines.append(f"{index}. {attack_names}")
         lines.append(f"   {qkey} {up}/{down}")
-    lines.append("\u203b\u53d1\u9001\u201c\u70b9\u8d5e/\u70b9\u8e29 + \u4f5c\u4e1aid\u201d\u53ef\u8bb0\u5f55\u672c\u5730\u8bc4\u4ef7")
     if int(region or 1) == 1:
         lines.append('\u203b\u4f7f\u7528 "b\u600e\u4e48\u62c6" \u6216 "\u53f0\u600e\u4e48\u62c6" \u53ef\u6309\u670d\u8fc7\u6ee4')
     lines.append("Support by pcrdfans.com")
@@ -160,7 +170,7 @@ def format_arena_solution_text(defender_ids: list[int], entries: list[dict], reg
 
 
 def _normalize_entries(entries: list[dict], user_id: str) -> list[dict]:
-    hashed_user = hash(user_id)
+    hashed_user = int.from_bytes(hashlib.blake2s(user_id.encode(), digest_size=4).digest(), "little")
     normalized: list[dict] = []
     for entry in entries:
         if not isinstance(entry, dict):
