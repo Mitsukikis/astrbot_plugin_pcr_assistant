@@ -50,9 +50,11 @@ def unit_id_from_id(chara_id: int) -> int:
 
 
 class CharaRoster:
-    def __init__(self, chara_name: dict[int, list[str]] | None = None):
+    def __init__(self, chara_name: dict[int, list[str]] | None = None, canonical_names=None):
         self._alias_to_id: dict[str, int] = {}
         source = chara_name or CHARA_NAME
+        for item in sorted(canonical_names or [], key=lambda item: item['id']):
+            self._alias_to_id.setdefault(compact_chara_text(item['name']), item['id'])
         for raw_id, aliases in source.items():
             chara_id = int(raw_id)
             for alias in aliases:
@@ -109,7 +111,19 @@ def extend_character_roster(characters, cache_path=None):
         if name not in existing:
             existing.insert(0, name)
         accepted.append({'id': cid, 'name': name})
-    _ROSTER = CharaRoster()
+    canonical = {}
+    for item in sorted(accepted, key=lambda item: item['id']):
+        canonical.setdefault(compact_chara_text(item['name']), item['id'])
+    official_ids = {item['id'] for item in accepted}
+    aliases = {cid: list(names) for cid, names in CHARA_NAME.items()}
+    # Legacy dictionaries include story NPC IDs such as Ameth 1900. Move their
+    # familiar aliases to the playable ID confirmed by the game database.
+    for cid, names in list(aliases.items()):
+        target = canonical.get(compact_chara_text(names[0])) if names else None
+        if cid not in official_ids and target is not None and target != cid:
+            aliases.setdefault(target, []).extend(names)
+            del aliases[cid]
+    _ROSTER = CharaRoster(aliases, canonical_names=accepted)
     if cache_path is not None:
         path = Path(cache_path)
         path.parent.mkdir(parents=True, exist_ok=True)

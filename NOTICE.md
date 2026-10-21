@@ -13,6 +13,7 @@
 - pcrdfans.com: <https://www.pcrdfans.com/>
   - “怎么拆/竞技场作业”功能调用 pcrdfans Bot API。
   - 本项目不打包 pcrdfans 数据，也不绕过 API Key。
+  - 可选网页模式仅匿名访问公开页面，返回当前查询少量结果截图并标注来源；站点限制访问时停止。网页截图不随代码或发布包分发。
 - KokkoroBot: <https://github.com/zzbslayer/KokkoroBot>
   - 本项目参考了 PCR QQ 机器人生态里的竞技场作业查询体验。
   - 角色别名/阵容解析相关数据和思路参考 KokkoroBot，KokkoroBot 使用 GPL-3.0 授权。

@@ -308,3 +308,65 @@ def test_status_render_failure_falls_back_to_text(plugin, plugin_module, monkeyp
     monkeypatch.setattr(plugin_module, 'render_clan_status', Mock(side_effect=RuntimeError('font missing')))
     replies = collect(plugin.clan_command, event(OWNER, '状态'))
     assert any(isinstance(reply, str) and '监控' in reply for reply in replies)
+
+
+def _web_query_fixture(plugin, plugin_module, tmp_path):
+    plugin.image_recognizer = types.SimpleNamespace(get_icon=lambda cid: None)
+    plugin.pcrdfans = types.SimpleNamespace(api_key='', query=AsyncMock())
+    plugin.arena_web = types.SimpleNamespace(enabled=True, query=AsyncMock(return_value=
+        types.SimpleNamespace(empty=False, path=tmp_path/'web.png', count=5,
+                              url='https://www.pcrdfans.com/battle')))
+    plugin._pcr_image_path = lambda category: str(tmp_path/(category+'.png'))
+    payload = ' '.join(plugin_module.name_for_id(cid) for cid in range(1001, 1006))
+    request = event(OWNER, '怎么拆 '+payload)
+    request.chain_result = lambda chain: chain
+    return request, payload
+
+
+def test_no_key_uses_enabled_public_web_query_and_never_bot_api(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    replies = collect(plugin._arena_solution_query, request, 1, payload)
+    plugin.arena_web.query.assert_awaited_once()
+    assert plugin.arena_web.query.await_args.args[0] == [1001,1002,1003,1004,1005]
+    assert any(isinstance(reply,str) and '网页前5条' in reply for reply in replies)
+    plugin.pcrdfans.query.assert_not_awaited()
+
+
+def test_web_error_returns_manual_link_without_fabricated_solutions(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    plugin.arena_web.query.side_effect = plugin_module.ArenaWebQueryError('要求验证')
+    replies = collect(plugin._arena_solution_query, request, 1, payload)
+    assert any(isinstance(reply,str) and '要求验证' in reply and 'id=100101' in reply for reply in replies)
+    plugin.pcrdfans.query.assert_not_awaited()
+
+
+def test_recognition_only_never_opens_browser(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    request.message_str = '识别阵容 '+payload
+    collect(plugin._arena_solution_query, request, 1, payload)
+    plugin.arena_web.query.assert_not_awaited()
+    plugin.pcrdfans.query.assert_not_awaited()
+
+
+def test_api_key_prefers_api_without_opening_web_browser(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    plugin.pcrdfans.api_key = 'synthetic-test-key'
+    plugin.pcrdfans.query.return_value = types.SimpleNamespace(entries=[])
+    collect(plugin._arena_solution_query, request, 1, payload)
+    plugin.pcrdfans.query.assert_awaited_once()
+    plugin.arena_web.query.assert_not_awaited()
+
+
+def test_permission_revocation_after_web_progress_prevents_browser_request(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    async def run():
+        replies = plugin._arena_solution_query(request, 1, payload)
+        assert await anext(replies)
+        assert await anext(replies)
+        progress = await anext(replies)
+        assert '网页查询' in progress
+        plugin.storage.set_group_enabled(GROUP, False)
+        with pytest.raises(StopAsyncIteration):
+            await anext(replies)
+        plugin.arena_web.query.assert_not_awaited()
+    asyncio.run(run())

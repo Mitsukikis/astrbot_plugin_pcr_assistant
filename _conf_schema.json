@@ -19,6 +19,11 @@
     "type": "string",
     "default": ""
   },
+  "pcrdfans_web_query_enabled": {
+    "description": "无作业网 Key 时，使用匿名浏览器访问公开作业网页并返回前5条结果截图。至少间隔30秒，遇到登录、验证码或访问限制即停止并返回链接。需要安装 Playwright 和 Chromium。",
+    "type": "bool",
+    "default": false
+  },
   "pcrdfans_search_url": {
     "description": "pcrdfans 作业搜索接口地址，通常保持默认。",
     "type": "string",

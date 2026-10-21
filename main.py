@@ -9,6 +9,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .arena_client import ArenaClient
+from .arena_web_query import ArenaWebQueryClient, ArenaWebQueryError
 from .arena_ranking import parse_arena_ranking_command
 from .arena_solution import (
     PCRDFANS_SEARCH_URL,
@@ -129,7 +130,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
@@ -436,6 +437,11 @@ class PCRAssistantPlugin(Star):
             _config_get(config, "pcrdfans_api_key", ""),
             _config_get(config, "pcrdfans_search_url", DEFAULT_PCRDFANS_SEARCH_URL),
         )
+        web_enabled = _config_get(config, 'pcrdfans_web_query_enabled', False)
+        self.arena_web = ArenaWebQueryClient(
+            enabled=web_enabled is True or str(web_enabled).lower() == 'true',
+            recognizer=self.image_recognizer,
+        )
         self.monitor_interval_seconds = _config_int(
             config,
             "monitor_interval_seconds",
@@ -449,6 +455,9 @@ class PCRAssistantPlugin(Star):
     async def terminate(self):
         self._monitor_task.cancel()
         await asyncio.gather(self._monitor_task, return_exceptions=True)
+        web_client = getattr(self, 'arena_web', None)
+        if web_client:
+            await web_client.close()
 
     def _user_allowed(self, sender_id: str) -> bool:
         return is_allowed_qq(
@@ -541,7 +550,7 @@ class PCRAssistantPlugin(Star):
             "出刀详情 history_id：查询真实会战记录图片\n"
             "\u9884\u7ea6/\u67e5\u6811/sl/\u7533\u8bf7\u51fa\u5200/\u6743\u9650\uff1a"
             "本群登记（按QQ隔离，不执行游戏操作）\n"
-            "怎么拆 + 游戏原图：识别右侧防守阵容；无Key提供带阵容作业网链接\n"
+            "怎么拆 + 游戏原图：识别右侧防守阵容；无Key可开启网页作业图查询\n"
             "竞技场更新卡池：更新头像；#怎么拆/结束查询：连续识图开关\n"
             "\u5f00\u542f\u624b\u52a8\u62a5\u5200/\u5173\u95ed\u624b\u52a8\u62a5\u5200/"
             "\u5f00\u542f\u56fe\u7247\u6a21\u5f0f/\u5173\u95ed\u56fe\u7247\u6a21\u5f0f\uff1a"
@@ -1381,8 +1390,24 @@ class PCRAssistantPlugin(Star):
         if recognition_only:
             return
         if not getattr(self.pcrdfans, 'api_key', ''):
-            links = '\n'.join(f"第{i}队作业：{pcrdfans_battle_url(t['ids'])}" for i,t in enumerate(teams, 1))
-            yield event.plain_result("角色识别已完成。尚未配置 pcrdfans 授权 Key，当前不能在机器人内自动取得解法。以下链接已带入识别阵容：\n" + links)
+            web_client = getattr(self, 'arena_web', None)
+            if web_client and web_client.enabled:
+                for number, team in enumerate(teams, 1):
+                    link = pcrdfans_battle_url(team['ids'])
+                    yield event.plain_result(f'正在通过作业网网页查询第{number}队，请稍候。多队查询会间隔限速。')
+                    path = self._pcr_image_path('arena_web')
+                    try:
+                        result = await web_client.query(team['ids'], path, region=region)
+                        if result.empty:
+                            yield event.plain_result(f'第{number}队：作业网页没有找到相关结果。\n{link}')
+                        else:
+                            yield event.chain_result(MessageChain().file_image(str(result.path)).chain)
+                            yield event.plain_result(f'第{number}队作业来自 pcrdfans.com，展示网页前{result.count}条。更多结果：\n{result.url}')
+                    except ArenaWebQueryError as exc:
+                        yield event.plain_result(f'第{number}队网页查询未完成：{exc}\n手动查询：{link}')
+            else:
+                links = '\n'.join(f"第{i}队作业：{pcrdfans_battle_url(t['ids'])}" for i,t in enumerate(teams, 1))
+                yield event.plain_result("角色识别已完成。尚未配置 pcrdfans 授权 Key，网页查询也未开启。以下链接已带入识别阵容：\n" + links)
             return
         for number, team in enumerate(teams, 1):
             try:
