@@ -3,7 +3,7 @@ display_name: PCR Assistant
 desc: 面向自用/小群的公主连结 AstrBot 助手，接入 AutoPCR、竞技场查询/推送、会战报刀与清日常入口。
 short_desc: AutoPCR + 竞技场 + 会战报刀的一体化 PCR 自用助手。
 help: 发送「pcr帮助」查看完整命令。
-version: 0.2.2
+version: 0.2.3
 author: zhajunyao
 repo: https://github.com/Mitsukikis/astrbot_plugin_pcr_assistant
 support_platforms:

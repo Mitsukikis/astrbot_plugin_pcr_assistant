@@ -133,7 +133,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
@@ -1336,7 +1336,7 @@ class PCRAssistantPlugin(Star):
             await self.arena.ranking_text(kind, page=page, user=sender, account="main")
         )
 
-    @require_pcr_access()
+    @require_pcr_access(allow_private=True)
     async def _arena_solution_query(self, event: AstrMessageEvent, region: int, payload: str):
         teams = []
         image_path = None
@@ -1444,7 +1444,7 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(f'正在统一查询{len(teams)}队并筛选不重人组合，完成后一次返回长图。网页模式需间隔限速，请稍候。')
         groups, failures = [], []
         for index, team in enumerate(teams, 1):
-            if not self._pcr_event_allowed(event):
+            if not self._pcr_event_allowed(event, allow_private=True):
                 return
             try:
                 if use_api:
@@ -1469,14 +1469,14 @@ class PCRAssistantPlugin(Star):
             except (ArenaWebQueryError, PcrdFansError) as exc:
                 groups.append([])
                 failures.append(f'第{index}队查询未完成：{exc}')
-        if not self._pcr_event_allowed(event):
+        if not self._pcr_event_allowed(event, allow_private=True):
             return
         plans = build_disjoint_team_plans(groups, max_plans=10)
         counts = [len(group) for group in groups]
         path = self._pcr_image_path('arena_combined')
         try:
             payload = await asyncio.to_thread(compose_team_plans_bytes, teams, plans, icon_provider, region, counts)
-            if not self._pcr_event_allowed(event):
+            if not self._pcr_event_allowed(event, allow_private=True):
                 return
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(payload)
@@ -1518,14 +1518,14 @@ class PCRAssistantPlugin(Star):
         yield event.plain_result(f"角色头像库更新完成：{result}")
 
     @filter.command(CMD_ARENA_CONTINUOUS)
-    @require_pcr_access()
+    @require_pcr_access(allow_private=True)
     async def arena_continuous_start(self, event: AstrMessageEvent):
         _mark_processed(event)
         self._arena_image_sessions[(_sender_id(event), _group_key(event))] = time.monotonic() + 600
         yield event.plain_result("已开启连续识图，十分钟内发送阵容截图即可查询。发送“结束查询”退出。")
 
     @filter.command(CMD_ARENA_CONTINUOUS_END)
-    @require_pcr_access()
+    @require_pcr_access(allow_private=True)
     async def arena_continuous_end(self, event: AstrMessageEvent):
         _mark_processed(event)
         self._arena_image_sessions.pop((_sender_id(event), _group_key(event)), None)
@@ -2014,7 +2014,7 @@ class PCRAssistantPlugin(Star):
             return
 
         expires = getattr(self, '_arena_image_sessions', {}).get((_sender_id(event), _group_key(event)), 0)
-        if expires > time.monotonic() and _has_image_message(event) and self._pcr_event_allowed(event):
+        if expires > time.monotonic() and _has_image_message(event) and self._pcr_event_allowed(event, allow_private=True):
             _mark_processed(event)
             async for result in self._arena_solution_query(event, 1, ''):
                 yield result

@@ -274,7 +274,8 @@ def test_terminate_cancels_background_monitor(plugin):
     asyncio.run(run())
 
 
-def test_no_api_key_still_identifies_and_returns_prefilled_link(plugin,plugin_module,tmp_path,monkeypatch):
+@pytest.mark.parametrize('group', [GROUP, None])
+def test_no_api_key_still_identifies_and_returns_prefilled_link(plugin,plugin_module,tmp_path,monkeypatch,group):
     plugin._arena_image_lock=asyncio.Lock()
     plugin.image_recognizer=types.SimpleNamespace(
         load_cached_templates=Mock(return_value=0),
@@ -285,7 +286,7 @@ def test_no_api_key_still_identifies_and_returns_prefilled_link(plugin,plugin_mo
     plugin._pcr_image_path=lambda category:str(tmp_path/(category+'.png'))
     monkeypatch.setattr(plugin_module,'_has_image_message',lambda event:True)
     monkeypatch.setattr(plugin_module,'_first_image_path',AsyncMock(return_value='synthetic.png'))
-    request=event(OWNER,'怎么拆')
+    request=event(OWNER,'怎么拆',group=group)
     request.chain_result=lambda chain:chain
     replies=collect(plugin._arena_solution_query,request,1,'')
     plugin.image_recognizer.recognize_teams.assert_called_once()
@@ -467,3 +468,130 @@ def test_cancelled_report_worker_cannot_write_late_file(plugin, plugin_module, t
             await asyncio.gather(task, return_exceptions=True)
             await replies.aclose()
     asyncio.run(run())
+
+
+def _private_request(request, sender=OWNER, group=None):
+    request.message_obj.group_id = group
+    request.message_obj.sender.user_id = sender
+    request.get_sender_id = lambda: sender
+    request.unified_msg_origin = f'qq:FriendMessage:{sender}'
+    return request
+
+
+@pytest.mark.parametrize('alias', ['怎么拆', 'b怎么拆', '台怎么拆', '日怎么拆', '怎么解', '识别阵容'])
+def test_private_solution_alias_reaches_query_without_group_enable(plugin, alias):
+    plugin.storage.set_group_enabled(GROUP, False)
+    replies = collect(plugin.plain_text_dispatch, event(OWNER, alias, group=None))
+    assert len(replies) == 1 and '五名角色' in replies[0]
+    assert not plugin.storage.group_enabled(GROUP)
+    plugin.real_api.clan_status.assert_not_awaited()
+
+
+@pytest.mark.parametrize('private_group', [None, '', 0, '0'])
+def test_private_web_solution_query_works_end_to_end(plugin, plugin_module, tmp_path, private_group):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    _private_request(request, group=private_group)
+    plugin.storage.set_group_enabled(GROUP, False)
+    replies = collect(plugin.plain_text_dispatch, request)
+    plugin.arena_web.query.assert_awaited_once()
+    assert any(isinstance(reply,str) and '网页前5条' in reply for reply in replies)
+    plugin.pcrdfans.query.assert_not_awaited()
+    plugin.arena.query.assert_not_awaited()
+    plugin.real_api.clan_status.assert_not_awaited()
+
+
+def test_explicit_allowlist_can_query_in_private_without_admin(plugin, plugin_module, tmp_path):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    _private_request(request, sender=OTHER)
+    plugin.config['allowed_qqs'] = OTHER
+    assert OTHER not in plugin.admin_qqs
+    assert collect(plugin.plain_text_dispatch, request)
+    plugin.arena_web.query.assert_awaited_once()
+
+
+@pytest.mark.parametrize('blocked', [False, True])
+def test_unapproved_or_blocked_private_queries_are_silent(plugin, plugin_module, tmp_path, blocked):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    _private_request(request, sender=OTHER)
+    if blocked:
+        plugin.config['allowed_qqs'] = OTHER
+        plugin.blocked_qqs.add(OTHER)
+    assert collect(plugin.plain_text_dispatch, request) == []
+    plugin.arena_web.query.assert_not_awaited()
+    plugin.pcrdfans.query.assert_not_awaited()
+
+
+def test_private_multi_team_query_returns_one_complete_report(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    _private_request(request)
+    payload = ' # '.join(' '.join(plugin_module.name_for_id(cid) for cid in team['ids']) for team in teams)
+    request.message_str = '怎么拆 '+payload
+    plugin.storage.set_group_enabled(GROUP, False)
+    replies = collect(plugin.plain_text_dispatch, request)
+    assert plugin.arena_web.query.await_count == 3
+    renderer.assert_called_once()
+    assert len(renderer.call_args.args[1]) == 10
+    assert any(isinstance(reply,str) and '10套完整组合' in reply for reply in replies)
+    assert sum(not isinstance(reply,str) for reply in replies) == 2  # Recognition + one combined report.
+
+
+def test_revoked_private_user_stops_between_team_queries(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    _private_request(request, sender=OTHER)
+    plugin.config['allowed_qqs'] = OTHER
+    async def revoke(*args, **kwargs):
+        plugin.config['allowed_qqs'] = ''
+        return types.SimpleNamespace(empty=False,candidates=[{'ids':list(range(1100,1105))}],count=1)
+    plugin.arena_web.query.side_effect = revoke
+    replies = collect(plugin._arena_combined_solutions, request, teams, 1, None)
+    assert len(replies) == 1 and '统一查询' in replies[0]
+    plugin.arena_web.query.assert_awaited_once()
+    renderer.assert_not_called()
+
+
+def test_private_continuous_images_are_session_scoped_and_can_end(plugin, plugin_module, monkeypatch):
+    plugin._arena_image_sessions = {}
+    calls = []
+    async def query(request, region, payload):
+        calls.append(request.unified_msg_origin)
+        yield 'queried'
+    monkeypatch.setattr(plugin, '_arena_solution_query', query)
+    image_component = type('Image', (), {})()
+    def picture(sender=OWNER, group=None):
+        request = event(sender, '', group=group)
+        request.get_messages = lambda:[image_component]
+        return request
+    plugin.storage.set_group_enabled(GROUP, False)
+    assert collect(plugin.plain_text_dispatch, event(OWNER, '#怎么拆', group=None))
+    assert collect(plugin.plain_text_dispatch, picture()) == ['queried']
+    plugin.storage.set_group_enabled(GROUP, True)
+    assert collect(plugin.plain_text_dispatch, picture(group=GROUP)) == []
+    plugin.config['allowed_qqs'] = OTHER
+    assert collect(plugin.plain_text_dispatch, picture(sender=OTHER)) == []
+    assert collect(plugin.plain_text_dispatch, event(OWNER, '结束查询', group=None))
+    assert collect(plugin.plain_text_dispatch, picture()) == []
+    assert calls == [f'qq:FriendMessage:{OWNER}']
+
+
+def test_private_single_query_revocation_before_browser_is_silent(plugin, plugin_module, tmp_path):
+    request, payload = _web_query_fixture(plugin, plugin_module, tmp_path)
+    _private_request(request, sender=OTHER)
+    plugin.config['allowed_qqs'] = OTHER
+    async def run():
+        replies = plugin._arena_solution_query(request, 1, payload)
+        await anext(replies)
+        await anext(replies)
+        assert '网页查询' in await anext(replies)
+        plugin.config['allowed_qqs'] = ''
+        with pytest.raises(StopAsyncIteration):
+            await anext(replies)
+        plugin.arena_web.query.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('command', ['清日常', '出刀监控', '竞技场监控', '竞技场排行榜1', '竞技场更新卡池'])
+def test_private_solution_support_does_not_open_unrelated_commands(plugin, command):
+    assert collect(plugin.plain_text_dispatch, event(OWNER, command, group=None)) == []
+    plugin.autopcr.health_text.assert_not_awaited()
+    plugin.arena.query.assert_not_awaited()
+    plugin.real_api.clan_status.assert_not_awaited()
