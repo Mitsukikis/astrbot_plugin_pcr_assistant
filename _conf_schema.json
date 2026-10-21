@@ -20,7 +20,7 @@
     "default": ""
   },
   "pcrdfans_web_query_enabled": {
-    "description": "无作业网 Key 时，使用匿名浏览器访问公开作业网页并返回前5条结果截图。至少间隔30秒，遇到登录、验证码或访问限制即停止并返回链接。需要安装 Playwright 和 Chromium。",
+    "description": "无作业网 Key 时，使用匿名浏览器查询公开作业页，单队最多10条，多队筛选不重人组合并一次返回长图。网站作业不足时如实展示。至少间隔30秒，遇到登录、验证码或访问限制即停止并返回链接。需要安装 Playwright 和 Chromium。",
     "type": "bool",
     "default": false
   },

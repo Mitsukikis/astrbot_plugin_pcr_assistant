@@ -630,10 +630,10 @@ def test_composition_rejects_non_bytes_payloads(tmp_path, payload):
     assert not output.exists()
 
 
-def test_composition_rejects_more_than_five_cards(tmp_path):
+def test_composition_rejects_more_than_ten_cards(tmp_path):
     output = tmp_path / 'too-many.png'
     with pytest.raises(web.ArenaWebQueryError):
-        web.compose_web_result([card_bytes()] * 6, output, DEFENDERS)
+        web.compose_web_result([card_bytes()] * 11, output, DEFENDERS)
     assert not output.exists()
 
 
@@ -670,7 +670,8 @@ def test_modal_is_checked_before_stale_result_nodes():
 
 def test_loading_old_results_are_not_returned_before_query_finishes(clock):
     async def run():
-        loading = SimpleNamespace(count=AsyncMock(side_effect=[1,0]))
+        states = iter([1, 0])
+        loading = SimpleNamespace(count=AsyncMock(side_effect=lambda: next(states, 0)))
         absent = SimpleNamespace(count=AsyncMock(return_value=0))
         results = SimpleNamespace(count=AsyncMock(return_value=10))
         body = SimpleNamespace(inner_text=AsyncMock(return_value='synthetic results'))
@@ -679,8 +680,9 @@ def test_loading_old_results_are_not_returned_before_query_finishes(clock):
              '.battle_search_button.ant-btn-loading, .battle_search_button[aria-busy="true"]':loading}[selector]))
         client = web.ArenaWebQueryClient(enabled=True)
         await client._wait_for_result(page)
-        assert clock.delays == [.4]
-        results.count.assert_awaited_once()
+        assert len(clock.delays) >= 3
+        assert all(delay == .4 for delay in clock.delays)
+        assert results.count.await_count >= 3
     asyncio.run(run())
 
 
@@ -711,3 +713,32 @@ def test_composition_worker_returns_bytes_without_writing_files(tmp_path):
     payload = web._compose_web_result_bytes([card_bytes()], DEFENDERS)
     assert isinstance(payload,bytes) and payload.startswith(b'\x89PNG')
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('limit,expected', [(0,5),(3,5),(5,5),(8,8),(10,10),(100,10)])
+def test_display_limit_is_at_least_five_and_at_most_ten(limit, expected):
+    assert web.ArenaWebQueryClient(max_results=limit).max_results == expected
+    assert web.ArenaWebQueryClient().max_results == 10
+
+
+@pytest.mark.parametrize('count', [5, 10])
+def test_composition_can_display_five_or_ten_complete_cards(tmp_path, count):
+    path = web.compose_web_result([card_bytes()] * count, tmp_path/'result.png', DEFENDERS)
+    with Image.open(path) as image:
+        assert image.height > 80 * count
+
+
+@pytest.mark.parametrize('sequence', [[3,5,5,5,5,5], [3,0,3,5,5,5,5,5]])
+def test_result_count_must_settle_before_capture(clock, sequence):
+    async def run():
+        counts = iter(sequence)
+        results = SimpleNamespace(count=AsyncMock(side_effect=lambda: next(counts)))
+        absent = SimpleNamespace(count=AsyncMock(return_value=0))
+        body = SimpleNamespace(inner_text=AsyncMock(return_value='synthetic results'))
+        page = SimpleNamespace(url=RESULT_URL, locator=Mock(side_effect=lambda selector:
+            {'body':body,'.ant-modal-content':absent,web.RESULT_SELECTOR:results,
+             '.battle_search_result_ctn':SimpleNamespace(filter=lambda **kwargs: absent),
+             '.battle_search_button.ant-btn-loading, .battle_search_button[aria-busy="true"]':absent}[selector]))
+        await web.ArenaWebQueryClient(enabled=True)._wait_for_result(page)
+        assert results.count.await_count >= len(sequence) - 2
+    asyncio.run(run())

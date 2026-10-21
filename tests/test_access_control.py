@@ -370,3 +370,100 @@ def test_permission_revocation_after_web_progress_prevents_browser_request(plugi
             await anext(replies)
         plugin.arena_web.query.assert_not_awaited()
     asyncio.run(run())
+
+
+def _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    teams = [{'ids': list(range(start, start+5))} for start in (1001, 1006, 1011)]
+    groups = [[{'ids': list(range(start,start+4)) + [start+4+position]} for position in range(5)]
+              for start in (1100,1200,1300)]
+    plugin.arena_web.query.side_effect = [types.SimpleNamespace(empty=False,candidates=group,count=len(group)) for group in groups]
+    renderer = Mock(return_value=b'synthetic report')
+    monkeypatch.setattr(plugin_module, 'compose_team_plans_bytes', renderer)
+    return request, teams, renderer
+
+
+def test_three_teams_return_one_report_only_after_all_queries(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    async def run():
+        replies = plugin._arena_combined_solutions(request, teams, 1, None)
+        progress = await anext(replies)
+        assert '统一查询3队' in progress
+        plugin.arena_web.query.assert_not_awaited()
+        image = await anext(replies)
+        assert not isinstance(image, str)
+        assert plugin.arena_web.query.await_count == 3
+        rest = [item async for item in replies]
+        assert len(rest) == 1 and '10套完整组合' in rest[0]
+    asyncio.run(run())
+    renderer.assert_called_once()
+    plans = renderer.call_args.args[1]
+    assert len(plans) == 10
+    assert all(len(set(cid for item in plan for cid in item['ids'])) == 15 for plan in plans)
+    assert all(call.kwargs['include_candidates'] is True for call in plugin.arena_web.query.await_args_list)
+    plugin.pcrdfans.query.assert_not_awaited()
+
+
+def test_missing_team_does_not_produce_partial_complete_plan(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    plugin.arena_web.query.side_effect = [
+        types.SimpleNamespace(empty=False,candidates=[{'ids':list(range(1100,1105))}],count=1),
+        plugin_module.ArenaWebQueryError('网页提示错误'),
+        types.SimpleNamespace(empty=False,candidates=[{'ids':list(range(1300,1305))}],count=1),
+    ]
+    replies = collect(plugin._arena_combined_solutions, request, teams, 1, None)
+    assert renderer.call_args.args[1] == []
+    assert any(isinstance(reply,str) and '没有完整' in reply and '第2队查询未完成' in reply for reply in replies)
+
+
+def test_access_revoked_between_team_queries_stops_remaining_work(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    async def revoke(*args, **kwargs):
+        plugin.storage.set_group_enabled(GROUP, False)
+        return types.SimpleNamespace(empty=False,candidates=[{'ids':list(range(1100,1105))}],count=1)
+    plugin.arena_web.query.side_effect = revoke
+    replies = collect(plugin._arena_combined_solutions, request, teams, 1, None)
+    assert len(replies) == 1
+    plugin.arena_web.query.assert_awaited_once()
+    renderer.assert_not_called()
+
+
+def test_three_team_api_also_filters_conflicting_ids(plugin, plugin_module, tmp_path, monkeypatch):
+    request, teams, renderer = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    plugin.pcrdfans.api_key = 'synthetic-test-key'
+    plugin.pcrdfans.query.side_effect = [types.SimpleNamespace(entries=[
+        {'atk':[{'id':cid*100+1} for cid in range(start,start+5)]}]) for start in (1100,1104,1300)]
+    replies = collect(plugin._arena_combined_solutions, request, teams, 2, None)
+    assert renderer.call_args.args[1] == []
+    assert any(isinstance(reply,str) and '没有完整' in reply for reply in replies)
+    plugin.arena_web.query.assert_not_awaited()
+
+
+def test_cancelled_report_worker_cannot_write_late_file(plugin, plugin_module, tmp_path, monkeypatch):
+    import threading
+    request, teams, _ = _combined_fixture(plugin, plugin_module, tmp_path, monkeypatch)
+    entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+    def held_render(*args):
+        entered.set()
+        release.wait(timeout=5)
+        completed.set()
+        return b'synthetic report'
+    monkeypatch.setattr(plugin_module, 'compose_team_plans_bytes', held_render)
+    async def run():
+        replies = plugin._arena_combined_solutions(request, teams, 1, None)
+        await anext(replies)
+        task = asyncio.create_task(anext(replies))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            assert await asyncio.to_thread(completed.wait, 2)
+            assert not (tmp_path/'arena_combined.png').exists()
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await replies.aclose()
+    asyncio.run(run())

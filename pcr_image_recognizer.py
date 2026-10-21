@@ -338,6 +338,43 @@ class PcrImageRecognizer:
             raise ImageRecognitionError("图片包含多队，请使用 recognize_teams 选择防守队")
         return teams[0]["ids"]
 
+    def recognize_slots(self, images) -> list[int]:
+        """Match exactly five known avatar frames in order, without I/O.
+
+        Accept a list/tuple of PIL images with each dimension in 24..512.
+        Use one locked bank snapshot and the existing strict slot matcher;
+        any invalid, uncertain or repeated identity aborts the whole result.
+        Caller images are neither modified nor closed.
+        """
+        if not isinstance(images, (list, tuple)) or len(images) != 5:
+            raise ImageRecognitionError("头像槽位必须是恰好五张图片的 list 或 tuple")
+        for index, image in enumerate(images, 1):
+            if not isinstance(image, Image.Image):
+                raise ImageRecognitionError(f"第 {index} 个头像槽位不是 PIL 图片")
+            if min(image.size) < 24 or max(image.size) > 512:
+                raise ImageRecognitionError(f"第 {index} 个头像槽位的尺寸必须在 24 至 512 像素之间")
+        with self._lock:
+            bank = self._bank
+        if not bank:
+            raise ImageRecognitionError("头像模板库为空，请先发送「竞技场更新卡池」更新头像模板")
+
+        ids = []
+        for index, image in enumerate(images, 1):
+            try:
+                chara_id, score = self._match_segment(image.convert("RGB"), bank)
+            except ImageRecognitionError as exc:
+                raise ImageRecognitionError(f"第 {index} 个头像槽位：{exc}") from exc
+            except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                raise ImageRecognitionError(f"无法读取第 {index} 个头像槽位：{exc}") from exc
+            if type(chara_id) is not int or not 1001 <= chara_id < 2000:
+                raise ImageRecognitionError(f"第 {index} 个头像槽位匹配到非标准角色 ID")
+            if not math.isfinite(score) or score < self.threshold:
+                raise ImageRecognitionError(f"第 {index} 个头像槽位的匹配置信度过低")
+            if chara_id in ids:
+                raise ImageRecognitionError(f"头像槽位含重复角色 {chara_id}，请检查图片")
+            ids.append(chara_id)
+        return ids
+
     def recognize_teams(self, image_path: str | os.PathLike, side='defense') -> list[dict]:
         """Recognize 1/3 rows, or left/right 1/3-row history panels.
 

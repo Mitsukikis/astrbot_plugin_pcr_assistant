@@ -9,7 +9,7 @@ import io
 import re
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,15 +20,18 @@ try:
     from .arena_solution import pcrdfans_battle_url
     from .pcr_cards import _font, _wrap
     from .pcr_chara import name_for_id
+    from .pcr_image_recognizer import ImageRecognitionError
 except ImportError:
     from arena_solution import pcrdfans_battle_url
     from pcr_cards import _font, _wrap
     from pcr_chara import name_for_id
+    from pcr_image_recognizer import ImageRecognitionError
 
 
 HOSTS = frozenset({'www.pcrdfans.com', 'pcrdfans.com'})
 REGIONS = {1: '全部角色', 2: '国服', 3: '台服', 4: '日服'}
 RESULT_SELECTOR = '.battle_search_single_result_ctn'
+MAX_RESULTS = 10
 BLOCK_MARKERS = (
     'verify you are human', 'verification required', 'checking your browser',
     'just a moment...', '确认您是真人', '验证您是人类', '人机验证',
@@ -51,6 +54,9 @@ class ArenaWebResult:
     url: str
     count: int
     empty: bool = False
+    candidates: list[dict] = field(default_factory=list)
+    available_count: int = 0
+    has_more: bool = False
 
 
 def _validate(defender_ids, region):
@@ -85,7 +91,7 @@ def _save_result(payload, output_path):
 
 def _compose_web_result_bytes(cards, defender_ids, region=1):
     _validate(defender_ids, region)
-    if not cards or len(cards) > 5:
+    if not cards or len(cards) > MAX_RESULTS:
         raise ArenaWebQueryError('网页没有可展示的完整作业。')
     images = []
     for payload in cards:
@@ -125,11 +131,11 @@ def _compose_web_result_bytes(cards, defender_ids, region=1):
 
 
 class ArenaWebQueryClient:
-    def __init__(self, enabled=False, timeout_seconds=60, min_interval_seconds=30, max_results=5, recognizer=None):
+    def __init__(self, enabled=False, timeout_seconds=90, min_interval_seconds=30, max_results=10, recognizer=None):
         self.enabled = enabled is True
         self.timeout_seconds = max(20, min(90, float(timeout_seconds)))
         self.min_interval_seconds = max(30, float(min_interval_seconds))
-        self.max_results = max(1, min(5, int(max_results)))
+        self.max_results = max(5, min(MAX_RESULTS, int(max_results)))
         self.recognizer = recognizer
         self._lock = asyncio.Lock()
         self._last_started = None
@@ -137,7 +143,7 @@ class ArenaWebQueryClient:
         self._task = None
         self._closed = False
 
-    async def query(self, defender_ids, output_path, region=1):
+    async def query(self, defender_ids, output_path, region=1, *, include_candidates=False):
         _validate(defender_ids, region)
         if not self.enabled or self._closed:
             raise ArenaWebQueryError('网页查询未启用。')
@@ -146,7 +152,7 @@ class ArenaWebQueryClient:
         if self._lock.locked():
             raise ArenaWebQueryError('已有网页查询正在进行，请稍后再试。')
         async with self._lock:
-            self._task = asyncio.create_task(self._run(defender_ids, output_path, region))
+            self._task = asyncio.create_task(self._run(defender_ids, output_path, region, include_candidates))
             try:
                 return await self._task
             except ArenaWebQueryBlocked:
@@ -155,14 +161,16 @@ class ArenaWebQueryClient:
             finally:
                 self._task = None
 
-    async def _run(self, defender_ids, output_path, region):
+    async def _run(self, defender_ids, output_path, region, include_candidates=False):
         if self._last_started is not None:
             delay = self._last_started + self.min_interval_seconds - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
         self._last_started = time.monotonic()
         try:
-            return await asyncio.wait_for(self._capture(defender_ids, output_path, region), self.timeout_seconds)
+            capture = (self._capture(defender_ids, output_path, region, include_candidates=True)
+                       if include_candidates else self._capture(defender_ids, output_path, region))
+            return await asyncio.wait_for(capture, self.timeout_seconds)
         except asyncio.TimeoutError as exc:
             raise ArenaWebQueryError('作业网页查询超时，请通过链接手动查看。') from exc
 
@@ -173,7 +181,7 @@ class ArenaWebQueryClient:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def _capture(self, defender_ids, output_path, region):
+    async def _capture(self, defender_ids, output_path, region, include_candidates=False):
         try:
             from playwright.async_api import async_playwright, Error as BrowserError
         except ImportError as exc:
@@ -195,15 +203,23 @@ class ArenaWebQueryClient:
                     await self._wait_for_result(page)
                 await self._check_region_and_defenders(page, region, defender_ids)
                 results = page.locator(RESULT_SELECTOR)
-                count = min(await results.count(), self.max_results)
+                available = await results.count()
+                count = min(available, self.max_results)
                 if not count:
                     return ArenaWebResult(None, url, 0, empty=True)
+                next_button = page.get_by_role('button', name='下一页', exact=True)
+                has_more = bool(await next_button.count() and await next_button.first.is_enabled())
                 cards = []
+                candidates = []
                 for index in range(count):
                     card = results.nth(index)
                     await self._wait_for_artwork(card)
                     cards.append(await card.screenshot(animations='disabled',
                         style=RESULT_SELECTOR + '{background:#fff !important;}'))
+                    if include_candidates:
+                        candidate = await self._read_candidate(card, index)
+                        if candidate:
+                            candidates.append(candidate)
                 try:
                     # The worker is pure. Only commit the file after awaiting it,
                     # so a cancelled query cannot leave a late image on disk.
@@ -211,7 +227,8 @@ class ArenaWebQueryClient:
                     path = _save_result(payload, output_path)
                 except (OSError, ValueError, RuntimeError) as exc:
                     raise ArenaWebQueryError('网页作业图片生成失败，请打开查询链接。') from exc
-                return ArenaWebResult(path, url, count)
+                return ArenaWebResult(path, url, count, candidates=candidates,
+                                      available_count=available, has_more=has_more)
             except ArenaWebQueryError:
                 raise
             except BrowserError as exc:
@@ -232,6 +249,7 @@ class ArenaWebQueryClient:
             raise ArenaWebQueryError('作业网站暂时不可用，请通过链接重试。')
 
     async def _wait_for_result(self, page):
+        last_count, stable_since = None, None
         while True:
             _check_location(page.url)
             text = (await page.locator('body').inner_text())[:16000].lower()
@@ -241,14 +259,57 @@ class ArenaWebQueryClient:
                 raise ArenaWebQueryError('网站返回了查询提示，已停止自动查询，请打开链接查看。')
             loading = page.locator('.battle_search_button.ant-btn-loading, .battle_search_button[aria-busy="true"]')
             if await loading.count():
+                last_count, stable_since = None, None
                 await asyncio.sleep(0.4)
                 continue
-            if await page.locator(RESULT_SELECTOR).count():
-                return
+            count = await page.locator(RESULT_SELECTOR).count()
+            if count:
+                now = time.monotonic()
+                if count != last_count:
+                    last_count, stable_since = count, now
+                elif now - stable_since >= 0.8:
+                    return
+                await asyncio.sleep(0.4)
+                continue
+            last_count, stable_since = None, None
             empty = page.locator('.battle_search_result_ctn').filter(has_text='没有找到相关结果')
             if await empty.count():
                 return
             await asyncio.sleep(0.4)
+
+    async def _read_candidate(self, card, index):
+        """Recognize only the visible attacking avatars, never hidden API data."""
+        attack = card.locator('.battle_search_element[id^="atk_"]')
+        if self.recognizer is None or await attack.count() != 1:
+            return None
+        payload = await attack.screenshot(animations='disabled')
+        avatars = attack.locator('.battle_result_detail_ctn > div[style*="background-image"]')
+        if await avatars.count() != 5:
+            return None
+        slots = [await avatars.nth(slot).screenshot(animations='disabled') for slot in range(5)]
+        try:
+            ids = await asyncio.to_thread(self._recognize_attack, slots)
+        except (ImageRecognitionError, ValueError, OSError):
+            return None
+        if len(ids) != 5 or len(set(ids)) != 5:
+            return None
+        metadata = card.locator('.battle_search_single_meta .battle_search_result_btns')
+        positive = card.locator('button:has(.anticon-like)')
+        negative = card.locator('button:has(.anticon-dislike)')
+        up = await positive.inner_text() if await positive.count() == 1 else '未返回'
+        down = await negative.inner_text() if await negative.count() == 1 else '未返回'
+        date = await metadata.last.inner_text() if await metadata.count() else '日期未返回'
+        return {'ids': ids, 'image': payload, 'rank': index,
+                'metadata': f'网页作业 #{index + 1}\n赞 {up.strip()[:8]} / 踩 {down.strip()[:8]}\n{date.strip()[:40]}'}
+
+    def _recognize_attack(self, slots):
+        images = []
+        for payload in slots:
+            with Image.open(io.BytesIO(payload)) as source:
+                if not 24 <= min(source.size) <= max(source.size) <= 512:
+                    raise ValueError('invalid avatar dimensions')
+                images.append(source.convert('RGB'))
+        return self.recognizer.recognize_slots(images)
 
     async def _check_region_and_defenders(self, page, region, defender_ids):
         label = page.locator('label').filter(has_text=re.compile('^' + re.escape(REGIONS[region]) + '$'))

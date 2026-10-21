@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import uuid
+from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -10,6 +11,8 @@ from astrbot.core.message.message_event_result import MessageChain
 
 from .arena_client import ArenaClient
 from .arena_web_query import ArenaWebQueryClient, ArenaWebQueryError
+from .arena_team_builder import build_disjoint_team_plans
+from .arena_team_report import compose_team_plans_bytes
 from .arena_ranking import parse_arena_ranking_command
 from .arena_solution import (
     PCRDFANS_SEARCH_URL,
@@ -55,7 +58,7 @@ from .compat_commands import build_compat_reply, match_compat_command
 from .monitoring import update_arena_entry_from_result, update_clan_damage_state
 from .pcr_image_recognizer import ImageRecognitionError, PcrImageRecognizer
 from .pcr_chara import parse_team_names
-from .pcr_chara import name_for_id, extend_character_roster, load_character_roster
+from .pcr_chara import name_for_id, extend_character_roster, load_character_roster, id_from_unit_id
 from .pcr_cards import render_arena_recognition, render_arena_solutions, render_clan_damage_detail
 from .real_api_client import PCRRealAPIClient, RealAPIError
 from .command_router import (
@@ -130,7 +133,7 @@ from .storage import PCRStorage, mask_value, parse_bind_payload
 
 PLUGIN_NAME = "astrbot_plugin_pcr_assistant"
 PLUGIN_DESC = "\u81ea\u7528 PCR \u52a9\u624b"
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 
 DEFAULT_AUTOPCR_BASE_URL = "http://127.0.0.1:18080/daily"
 DEFAULT_AUTOPCR_PUBLIC_URL = "http://你的服务器IP:18080/daily/login"
@@ -1389,6 +1392,10 @@ class PCRAssistantPlugin(Star):
         recognition_only = payload.strip() == '全部' or _normalized_text(event).startswith(('识别阵容', '阵容识别'))
         if recognition_only:
             return
+        if len(teams) > 1:
+            async for reply in self._arena_combined_solutions(event, teams, region, icon_provider):
+                yield reply
+            return
         if not getattr(self.pcrdfans, 'api_key', ''):
             web_client = getattr(self, 'arena_web', None)
             if web_client and web_client.enabled:
@@ -1402,7 +1409,10 @@ class PCRAssistantPlugin(Star):
                             yield event.plain_result(f'第{number}队：作业网页没有找到相关结果。\n{link}')
                         else:
                             yield event.chain_result(MessageChain().file_image(str(result.path)).chain)
-                            yield event.plain_result(f'第{number}队作业来自 pcrdfans.com，展示网页前{result.count}条。更多结果：\n{result.url}')
+                            detail = f'展示网页前{result.count}条'
+                            if result.count < 5:
+                                detail = f'当前查询页仅有{result.count}条匹配作业，已全部展示'
+                            yield event.plain_result(f'第{number}队作业来自 pcrdfans.com，{detail}。查询链接：\n{result.url}')
                     except ArenaWebQueryError as exc:
                         yield event.plain_result(f'第{number}队网页查询未完成：{exc}\n手动查询：{link}')
             else:
@@ -1423,6 +1433,67 @@ class PCRAssistantPlugin(Star):
                 yield event.chain_result(MessageChain().file_image(str(path)).chain)
             except (OSError, ValueError, RuntimeError):
                 yield event.plain_result(result.format_text())
+
+    async def _arena_combined_solutions(self, event, teams, region, icon_provider):
+        web_client = getattr(self, 'arena_web', None)
+        use_api = bool(getattr(self.pcrdfans, 'api_key', ''))
+        links = '\n'.join(f"第{i}队：{pcrdfans_battle_url(team['ids'])}" for i, team in enumerate(teams, 1))
+        if not use_api and not (web_client and web_client.enabled):
+            yield event.plain_result('尚未开启网页查询或配置作业网 Key。\n' + links)
+            return
+        yield event.plain_result(f'正在统一查询{len(teams)}队并筛选不重人组合，完成后一次返回长图。网页模式需间隔限速，请稍候。')
+        groups, failures = [], []
+        for index, team in enumerate(teams, 1):
+            if not self._pcr_event_allowed(event):
+                return
+            try:
+                if use_api:
+                    result = await self.pcrdfans.query(team['ids'], _sender_id(event), region=region)
+                    candidates = []
+                    for position, entry in enumerate(result.entries[:10]):
+                        try:
+                            ids = [id_from_unit_id(int(unit['id'] if isinstance(unit, dict) else unit))
+                                   for unit in entry.get('atk', [])]
+                            metadata = f"作业 #{position + 1}\n赞 {int(entry.get('up') or 0)} / 踩 {int(entry.get('down') or 0)}"
+                            candidates.append({'ids': ids, 'metadata': metadata})
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                else:
+                    result = await web_client.query(team['ids'], self._pcr_image_path('arena_web'),
+                                                    region=region, include_candidates=True)
+                    candidates = result.candidates
+                    skipped = result.count - len(candidates)
+                    if skipped > 0:
+                        failures.append(f'第{index}队网页返回{result.count}条，其中{skipped}条头像身份无法可靠确认，未参与组合。')
+                groups.append(candidates)
+            except (ArenaWebQueryError, PcrdFansError) as exc:
+                groups.append([])
+                failures.append(f'第{index}队查询未完成：{exc}')
+        if not self._pcr_event_allowed(event):
+            return
+        plans = build_disjoint_team_plans(groups, max_plans=10)
+        counts = [len(group) for group in groups]
+        path = self._pcr_image_path('arena_combined')
+        try:
+            payload = await asyncio.to_thread(compose_team_plans_bytes, teams, plans, icon_provider, region, counts)
+            if not self._pcr_event_allowed(event):
+                return
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(payload)
+            yield event.chain_result(MessageChain().file_image(str(path)).chain)
+        except (OSError, ValueError, RuntimeError):
+            yield event.plain_result('联合解法长图生成失败，未返回不完整的逐队方案。\n' + links)
+            return
+        if len(plans) >= 5:
+            summary = f'已汇总{len(plans)}套完整组合，每套{len(teams) * 5}个角色不重复；不同方案之间是备选关系。'
+        elif plans:
+            summary = f'当前候选仅能组成{len(plans)}套完整不重人方案，已全部展示，未凑数。'
+        else:
+            summary = '当前候选没有完整的不重人组合，不能直接组成三队。' if len(teams) == 3 else '当前候选没有完整的不重人组合。'
+        summary += '\n各队候选：' + ' / '.join(map(str, counts))
+        if failures:
+            summary += '\n' + '\n'.join(failures)
+        yield event.plain_result(summary + '\n数据来源：pcrdfans.com；网页作业组合不等于战斗模拟。\n' + links)
 
     def _pcr_image_path(self, category):
         return os.path.join(os.path.dirname(__file__), 'data', 'reports', f'{category}_{uuid.uuid4().hex}.png')
