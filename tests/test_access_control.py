@@ -595,3 +595,24 @@ def test_private_solution_support_does_not_open_unrelated_commands(plugin, comma
     plugin.autopcr.health_text.assert_not_awaited()
     plugin.arena.query.assert_not_awaited()
     plugin.real_api.clan_status.assert_not_awaited()
+
+
+@pytest.mark.parametrize('group', [GROUP, None])
+def test_attached_nickname_command_queries_correct_playable_ids(plugin, plugin_module, tmp_path, group):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    request.message_obj.group_id = group
+    request.unified_msg_origin = SESSION if group else f'qq:FriendMessage:{OWNER}'
+    request.message_str = '怎么拆春剑黄骑AMS蚊子布丁'
+    replies = collect(plugin.plain_text_dispatch, request)
+    plugin.arena_web.query.assert_awaited_once()
+    assert plugin.arena_web.query.await_args.args[0] == [1089,1034,1230,1186,1007]
+    assert any(isinstance(reply,str) and '爱梅斯' in reply and '涅比亚' in reply for reply in replies)
+    plugin.arena.query.assert_not_awaited()
+
+
+def test_new_nicknames_do_not_bypass_private_qq_allowlist(plugin, plugin_module, tmp_path):
+    request, _ = _web_query_fixture(plugin, plugin_module, tmp_path)
+    _private_request(request, sender=OTHER)
+    request.message_str = '怎么拆春剑黄骑AMS蚊子布丁'
+    assert collect(plugin.plain_text_dispatch, request) == []
+    plugin.arena_web.query.assert_not_awaited()

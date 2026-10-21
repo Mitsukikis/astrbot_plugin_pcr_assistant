@@ -10,6 +10,7 @@ except ImportError:
 
 
 UNKNOWN_CHARA_ID = 1000
+_LEGACY_NPC_PLAYABLE = {1900: (1230, '爱梅斯'), 1909: (1186, '涅比亚')}
 _SEPARATOR_RE = re.compile(r"[\s,，、/|_+\-]+")
 _BRACKET_TRANSLATION = str.maketrans({
     "（": "(",
@@ -107,6 +108,9 @@ def extend_character_roster(characters, cache_path=None):
         name = str(item.get('name') or '').strip()
         if not 1001 <= cid < 2000 or not name or len(name) > 100:
             continue
+        legacy = _LEGACY_NPC_PLAYABLE.get(cid)
+        if legacy and compact_chara_text(name) == compact_chara_text(legacy[1]):
+            cid = legacy[0]
         existing = CHARA_NAME.setdefault(cid, [])
         if name not in existing:
             existing.insert(0, name)

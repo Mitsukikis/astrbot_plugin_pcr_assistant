@@ -72,7 +72,7 @@ def parse_solution_command(text: str) -> tuple[int, str] | None:
                 return region, ""
             if raw.startswith(command):
                 tail = raw[len(command):].strip()
-                if tail == "" or raw[len(command):len(command) + 1].isspace():
+                if tail == "" or raw[len(command):len(command) + 1].isspace() or alias == "怎么拆":
                     return region, tail
     return None
 
